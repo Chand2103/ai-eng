@@ -1,34 +1,38 @@
 import torch
 import numpy as np
 import soundfile as sf
-from transformers import AutoProcessor, AutoModel
+from omnivoice import OmniVoice
 
 class TTS:
     def __init__(self):
-        self.model_id = "k2-fsa/OmniVoice"
+        print("Loading OmniVoice...")
 
-        self.processor = AutoProcessor.from_pretrained(self.model_id)
-
-        self.model = AutoModel.from_pretrained(
-            self.model_id,
-            trust_remote_code=True,
-            device_map="auto",
-            torch_dtype=torch.float16
+        self.model = OmniVoice.from_pretrained(
+            "k2-fsa/OmniVoice",
+            device_map="cuda:0",   # IMPORTANT
+            dtype=torch.float16
         )
 
         self.sample_rate = 24000
 
-    def synthesize(self, text: str, out_path="output.wav"):
-        inputs = self.processor(text=text, return_tensors="pt").to("cuda")
+        print("OmniVoice loaded")
+
+    def synthesize(self, text: str, out_path="output.wav",
+                   ref_audio=None, ref_text=None):
+
+        print(f"TTS: {text}")
 
         with torch.no_grad():
-            try:
-                audio = self.model.generate(**inputs)
-            except Exception:
-                audio = self.model(text)
+            audio = self.model.generate(
+                text=text,
+                ref_audio=ref_audio,   # optional
+                ref_text=ref_text      # optional
+            )
 
-        audio = audio.cpu().numpy()
+        # OmniVoice returns list of arrays
+        audio = audio[0]
 
+        audio = np.asarray(audio)
         audio = audio / (np.max(np.abs(audio)) + 1e-8)
 
         sf.write(out_path, audio, self.sample_rate)
