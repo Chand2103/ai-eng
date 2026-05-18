@@ -1,4 +1,4 @@
-import sounddevice as sd
+# import sounddevice as sd
 import soundfile as sf
 import numpy as np
 from stt import STT
@@ -8,28 +8,28 @@ from tts import TTS
 SAMPLE_RATE = 16000
 DURATION_LIMIT = 10
 
-def record_audio(filename="input.wav"):
-    print("\nPress ENTER to start recording...")
-    input()
+# def record_audio(filename="input.wav"):
+#     print("\nPress ENTER to start recording...")
+#     input()
 
-    print("Recording... Press ENTER again to stop.")
-    recording = []
+#     print("Recording... Press ENTER again to stop.")
+#     recording = []
 
-    def callback(indata, frames, time, status):
-        recording.append(indata.copy())
+#     def callback(indata, frames, time, status):
+#         recording.append(indata.copy())
 
-    stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, callback=callback)
-    stream.start()
+#     stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, callback=callback)
+#     stream.start()
 
-    input()  # stop recording
+#     input()  # stop recording
 
-    stream.stop()
-    stream.close()
+#     stream.stop()
+#     stream.close()
 
-    audio = np.concatenate(recording, axis=0)
-    sf.write(filename, audio, SAMPLE_RATE)
+#     audio = np.concatenate(recording, axis=0)
+#     sf.write(filename, audio, SAMPLE_RATE)
 
-    return filename
+#     return filename
 
 
 def play_audio(file):
@@ -48,7 +48,7 @@ def main():
     print("Ready!")
 
     while True:
-        audio_file = record_audio()
+        audio_file = "input.wav"
 
         print("\n[STT]")
         text = stt.transcribe(audio_file)
