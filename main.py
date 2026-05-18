@@ -32,10 +32,10 @@ DURATION_LIMIT = 10
 #     return filename
 
 
-def play_audio(file):
-    data, sr = sf.read(file)
-    sd.play(data, sr)
-    sd.wait()
+# def play_audio(file):
+#     data, sr = sf.read(file)
+#     sd.play(data, sr)
+#     sd.wait()
 
 
 def main():
@@ -64,8 +64,8 @@ def main():
         print("\n[TTS]")
         audio_out = tts.synthesize(response)
 
-        print("\n[PLAYING]")
-        play_audio(audio_out)
+        # print("\n[PLAYING]")
+        # play_audio(audio_out)
 
 
 if __name__ == "__main__":
