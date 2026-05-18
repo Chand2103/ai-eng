@@ -47,25 +47,24 @@ def main():
 
     print("Ready!")
 
-    while True:
-        audio_file = "input.wav"
+    audio_file = "input.wav"
 
-        print("\n[STT]")
-        text = stt.transcribe(audio_file)
-        print("You said:", text)
+    print("\n[STT]")
+    text = stt.transcribe(audio_file)
+    print("You said:", text)
 
-        if not text:
-            continue
+    # if not text:
+    #     continue
 
-        print("\n[LLM]")
-        response = llm.generate(text)
-        print("AI:", response)
+    print("\n[LLM]")
+    response = llm.generate(text)
+    print("AI:", response)
 
-        print("\n[TTS]")
-        audio_out = tts.synthesize(response)
+    print("\n[TTS]")
+    audio_out = tts.synthesize(response)
 
-        # print("\n[PLAYING]")
-        # play_audio(audio_out)
+    # print("\n[PLAYING]")
+    # play_audio(audio_out)
 
 
 if __name__ == "__main__":
