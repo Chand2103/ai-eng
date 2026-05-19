@@ -6,7 +6,6 @@ from llm import LLM
 from tts import TTS
 
 SAMPLE_RATE = 16000
-DURATION_LIMIT = 10
 
 # def record_audio(filename="input.wav"):
 #     print("\nPress ENTER to start recording...")
@@ -47,24 +46,41 @@ def main():
 
     print("Ready!")
 
-    audio_file = "input.wav"
+    turn_count = 0
+    
+    while True:
+        turn_count += 1
+        audio_file = "input.wav"
 
-    print("\n[STT]")
-    text = stt.transcribe(audio_file)
-    print("You said:", text)
+        # User prompts
+        print("\nPress ENTER to speak...")
+        input()
 
-    # if not text:
-    #     continue
+        print("Hit ENTER to send...")
+        input()
 
-    print("\n[LLM]")
-    response = llm.generate(text)
-    print("AI:", response)
+        # STT
+        print("\n[STT]")
+        text = stt.transcribe(audio_file)
+        if not text:
+            print("No speech detected. Try again.")
+            continue
+        print("You said:", text)
 
-    print("\n[TTS]")
-    audio_out = tts.synthesize(response)
+        # LLM - use history after first turn
+        print("\n[LLM]")
+        use_history = turn_count > 1
+        response = llm.generate(text, use_history=use_history)
+        print("AI:", response)
 
-    # print("\n[PLAYING]")
-    # play_audio(audio_out)
+        # TTS - only for the last response
+        print("\n[TTS]")
+        audio_out = tts.synthesize(response)
+
+        print(f"\n[Turn {turn_count} complete - Audio saved to {audio_out}]")
+
+        # print("\n[PLAYING]")
+        # play_audio(audio_out)
 
 
 if __name__ == "__main__":

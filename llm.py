@@ -19,12 +19,21 @@ class LLM:
             "Keep responses short, natural, and conversational. "
             "Correct the user's English if needed."
         )
+        
+        # Conversation history for memory management
+        self.conversation_history = []
 
-    def generate(self, text: str) -> str:
+    def generate(self, text: str, use_history: bool = False) -> str:
         messages = [
             {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": text}
         ]
+        
+        # Add conversation history if enabled
+        if use_history:
+            messages.extend(self.conversation_history)
+        
+        # Add current user message
+        messages.append({"role": "user", "content": text})
 
         prompt = self.tokenizer.apply_chat_template(
             messages,
@@ -41,6 +50,25 @@ class LLM:
             do_sample=True
         )
 
-        response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        full_response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        
+        # Extract only the assistant's response (after the last <|assistant|> token)
+        assistant_response = self._extract_assistant_response(full_response)
+        
+        # Append to history for next turns
+        self.conversation_history.append({"role": "user", "content": text})
+        self.conversation_history.append({"role": "assistant", "content": assistant_response})
 
-        return response
+        return assistant_response
+    
+    def _extract_assistant_response(self, full_response: str) -> str:
+        """Extract only the assistant's response from the full decoded output."""
+        # Find the last occurrence of assistant marker and extract response after it
+        if "<|assistant|>" in full_response:
+            parts = full_response.split("<|assistant|>")
+            if len(parts) > 1:
+                response = parts[-1].strip()
+                # Remove end markers if present
+                response = response.replace("<|end_header_id|>", "").strip()
+                return response
+        return full_response.strip()
