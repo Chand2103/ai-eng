@@ -50,7 +50,7 @@ def main():
     
     while True:
         turn_count += 1
-        audio_file = "input.wav"
+        audio_file = f"input{turn_count}.wav"
 
         # User prompts
         print("\nPress ENTER to speak...")
