@@ -50,25 +50,12 @@ class LLM:
             do_sample=True
         )
 
-        full_response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        
-        # Extract only the assistant's response (after the last <|assistant|> token)
-        assistant_response = self._extract_assistant_response(full_response)
+        # Extract only the generated tokens (skip the input tokens)
+        generated_ids = outputs[0][inputs["input_ids"].shape[-1]:]
+        assistant_response = self.tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
         
         # Append to history for next turns
         self.conversation_history.append({"role": "user", "content": text})
         self.conversation_history.append({"role": "assistant", "content": assistant_response})
 
         return assistant_response
-    
-    def _extract_assistant_response(self, full_response: str) -> str:
-        """Extract only the assistant's response from the full decoded output."""
-        # Find the last occurrence of assistant marker and extract response after it
-        if "<|assistant|>" in full_response:
-            parts = full_response.split("<|assistant|>")
-            if len(parts) > 1:
-                response = parts[-1].strip()
-                # Remove end markers if present
-                response = response.replace("<|end_header_id|>", "").strip()
-                return response
-        return full_response.strip()
