@@ -54,10 +54,6 @@ echo "[4/10] Cloning repository..."
 
 cd /workspace
 
-if [ ! -d "ai-eng" ]; then
-    git clone https://github.com/Chand2103/ai-eng.git
-fi
-
 cd ai-eng
 
 # ---------------------------------------
