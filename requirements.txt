@@ -4,3 +4,6 @@ torch
 sounddevice
 soundfile
 numpy
+fastapi
+uvicorn
+python-multipart
