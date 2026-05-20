@@ -1,6 +1,8 @@
 ```bash
 #!/bin/bash
 
+set -e
+
 echo "========================================"
 echo " AI Voice Assistant Vast.ai Setup"
 echo "========================================"
@@ -10,7 +12,7 @@ cd /workspace
 # ---------------------------------------
 # Install system packages
 # ---------------------------------------
-echo "[1/10] Installing system packages..."
+echo "[1/9] Installing system packages..."
 
 apt update && apt install -y \
     git \
@@ -26,7 +28,7 @@ apt update && apt install -y \
 # ---------------------------------------
 # Install Miniconda
 # ---------------------------------------
-echo "[2/10] Installing Miniconda..."
+echo "[2/9] Installing Miniconda..."
 
 if [ ! -d "/workspace/miniconda3" ]; then
     wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
@@ -39,34 +41,34 @@ export PATH="/workspace/miniconda3/bin:$PATH"
 source /workspace/miniconda3/etc/profile.d/conda.sh
 
 # ---------------------------------------
-# Create Python 3.11 environment
+# Create conda environment
 # ---------------------------------------
-echo "[3/10] Creating Python 3.11 environment..."
+echo "[3/9] Creating Python 3.11 environment..."
 
-conda create -y -n voiceai python=3.11
+if ! conda env list | grep -q "voiceai"; then
+    conda create -y -n voiceai python=3.11
+fi
 
 conda activate voiceai
 
 # ---------------------------------------
-# Clone repo
+# Go into project directory
 # ---------------------------------------
-echo "[4/10] Cloning repository..."
+echo "[4/9] Entering project directory..."
 
-cd /workspace
-
-cd ai-eng
+cd /workspace/ai-eng
 
 # ---------------------------------------
 # Upgrade pip
 # ---------------------------------------
-echo "[5/10] Upgrading pip..."
+echo "[5/9] Upgrading pip..."
 
 pip install --upgrade pip
 
 # ---------------------------------------
 # Install CUDA PyTorch
 # ---------------------------------------
-echo "[6/10] Installing PyTorch CUDA..."
+echo "[6/9] Installing CUDA PyTorch..."
 
 pip install torch torchvision torchaudio \
     --index-url https://download.pytorch.org/whl/cu121
@@ -74,7 +76,7 @@ pip install torch torchvision torchaudio \
 # ---------------------------------------
 # Install project dependencies
 # ---------------------------------------
-echo "[7/10] Installing dependencies..."
+echo "[7/9] Installing dependencies..."
 
 pip install \
     transformers \
@@ -96,7 +98,7 @@ pip install \
 # ---------------------------------------
 # HuggingFace login
 # ---------------------------------------
-echo "[8/10] HuggingFace Login"
+echo "[8/9] HuggingFace Login"
 echo ""
 echo "Paste your HuggingFace token below"
 echo ""
@@ -104,20 +106,9 @@ echo ""
 huggingface-cli login
 
 # ---------------------------------------
-# Verify CUDA
-# ---------------------------------------
-echo "[9/10] Checking CUDA..."
-
-python -c "
-import torch
-print('CUDA Available:', torch.cuda.is_available())
-print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None')
-"
-
-# ---------------------------------------
 # Start backend server
 # ---------------------------------------
-echo "[10/10] Starting FastAPI server..."
+echo "[9/9] Starting FastAPI server..."
 
 uvicorn server:app --host 0.0.0.0 --port 8000
 ```
