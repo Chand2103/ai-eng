@@ -1,143 +1,86 @@
-# Voice Agent Server - Notes and Investigation Results
+# Voice Agent Server - Notes
 
-## WebSocket Investigation Spike (REQUIRED BEFORE FULL BUILD)
+## WebSocket Server
 
-### Purpose
-Vast.ai's serverless routing uses a `/route/` endpoint that returns a worker URL + auth_data, then clients send direct POST requests to that worker. The PyWorker proxy validates and forwards requests. This architecture is designed for short HTTP request/response cycles. We need to verify if WebSocket upgrade requests are supported through this proxy layer.
+The FastAPI server (`server.py`) exposes a single persistent WebSocket endpoint:
 
-### Echo Server Files Created
-- `echo_server.py` - Minimal FastAPI WebSocket echo server
-- `echo_Dockerfile` - Dockerfile using vastai/base-image
-- `echo_requirements.txt` - Minimal dependencies
-- `echo_test_client.py` - Test client for WebSocket validation
+```
+/ws/{session_id}
+```
 
-### Deployment Steps (User Action Required)
+Each connection gets its own conversation history stored in an in-memory dict keyed by `session_id`. The history is cleaned up when the connection closes (normal close, error, or timeout), so a worker can be reused for sequential sessions without leaking state.
 
-1. **Build the echo server image:**
-   ```bash
-   docker build -f echo_Dockerfile -t echo-server:latest .
-   ```
+### Pipeline per turn
 
-2. **Push to a registry** (Docker Hub, GHCR, or Vast's registry if supported)
+1. Client sends raw audio bytes (e.g. a WAV file).
+2. Server runs STT on the bytes in memory (`STT.transcribe_bytes`).
+3. If speech is detected, the server runs the LLM with that session's history.
+4. Server runs TTS on the response and returns WAV bytes.
+5. Both turns are appended to that session's history.
 
-3. **Deploy to Vast.ai Serverless:**
-   - Follow https://docs.vast.ai/documentation/serverless/getting-started-with-serverless
-   - Use custom template pointing to your echo-server image
-   - Ensure the template exposes port 8000
-   - Note the endpoint URL provided by Vast
+Errors at each stage are logged and the session continues; one bad audio chunk does not kill the connection.
 
-4. **Test the connection:**
-   ```bash
-   # First, test the health endpoint to verify deployment
-   curl https://your-vast-endpoint/health
-   
-   # Then test WebSocket through Vast's routing
-   python echo_test_client.py --url wss://your-vast-endpoint/ws/echo --idle 120
-   ```
+### Health endpoint
 
-### What to Test and Record
+```
+GET /health
+```
 
-1. **WebSocket Handshake:** Does the connection upgrade succeed through Vast's routing?
-   - Expected: Connection established without error
-   - Failure mode: Connection refused, 404, or timeout during upgrade
+Returns `200 {"status": "healthy"}` once all three models are loaded at module import time. Returns `503` if loading failed.
 
-2. **Echo Functionality:** Does the first message get echoed back correctly?
-   - Expected: Binary message sent = binary message received
-   - Failure mode: No response, corrupted data, or connection drops
+## Concurrency Assumption
 
-3. **Idle Timeout:** Does the connection survive 2+ minutes of inactivity?
-   - Expected: Connection stays alive, second message after idle succeeds
-   - Failure mode: Connection closed during idle period (note the close code and reason)
+Each GPU worker is expected to handle **one active voice session at a time**. The autoscaler creates additional GPU workers for additional concurrent users, so this app does **not** implement request queuing or batching. Session state is keyed by `session_id` and cleaned up on disconnect so a reused worker never leaks history between sessions.
 
-4. **Connection Duration:** Can the connection stay open for a realistic voice session (5-10 minutes)?
-   - Test with longer idle periods if the 2-minute test passes
-   - Send periodic messages to simulate bursty voice traffic
+## Local Development / Testing
 
-### Expected Outcomes and Decision Matrix
-
-| Outcome | Next Step | Connection Architecture |
-|---------|-----------|------------------------|
-| WebSocket works through `/route/` proxy, no idle timeout | Use Vast's standard routing with WebSocket | Frontend → Vast `/route/` → PyWorker → Worker WebSocket |
-| WebSocket works but has enforced idle timeout < 2min | Use Vast's routing with keep-alive pings | Same as above, add ping/pong keep-alive |
-| WebSocket handshake fails through proxy | Use direct worker connectivity | Frontend gets direct worker URL/IP, bypasses `/route/` proxy |
-| Connection drops after short idle (< 30s) | Use direct worker connectivity | Bypass proxy entirely |
-
-### Direct Worker Connectivity (Fallback Plan)
-
-If WebSocket-through-proxy fails, Vast exposes direct instance connectivity for SSH/Jupyter. We may be able to:
-- Get the direct worker instance URL/IP+port from Vast's API
-- Expose the WebSocket server directly on that port
-- Frontend connects directly to the worker once assigned
-
-This bypasses the PyWorker proxy entirely but requires:
-- Verifying Vast allows custom port exposure for serverless workers
-- Implementing our own session assignment logic
-- Potentially different security model (no PyWorker validation)
-
-### Investigation Status
-⏳ **PENDING** - Waiting for Vast.ai deployment and test results
-
----
-
-## Production Build Instructions (After Investigation Complete)
-
-### Docker Build with HF Token Secret
-
-The production Dockerfile will download gated HF models at build time using BuildKit secrets:
+Run the server locally (requires a CUDA GPU and the models will download on first run unless already cached):
 
 ```bash
-# Set your HF token as environment variable
-export HF_TOKEN=your_huggingface_token_here
+pip install -r requirements.txt
+python server.py
+```
 
-# Build with secret mount
+Test with the included client:
+
+```bash
+python test_client.py --url ws://localhost:8000/ws/test --audio input1.wav --output response.wav
+```
+
+## Docker Build
+
+Build the production image with the gated HF model downloaded using a BuildKit secret:
+
+```bash
+export HF_TOKEN=your_huggingface_token_here
 docker build --secret id=hf_token,env=HF_TOKEN -t voice-agent:latest .
 ```
 
-### Local Testing with GPU
+## Docker Local Run
+
+Run the built image locally with GPU access:
 
 ```bash
-# Run with GPU access
 docker run --gpus all -p 8000:8000 voice-agent:latest
-
-# Test health endpoint
-curl http://localhost:8000/health
-
-# Test with audio file
-python test_client.py --url ws://localhost:8000/ws/test --audio sample.wav
 ```
 
-### Model Paths and Environment Variables
-
-The production Dockerfile will set these to point to baked-in models:
+Then test:
 
 ```bash
-# LLM
-LLM_MODEL_PATH=/models/llama-3.1-8b-instruct
+curl http://localhost:8000/health
+python test_client.py --url ws://localhost:8000/ws/test --audio input1.wav --output response.wav
+```
 
-# STT  
+## Model Paths
+
+The Dockerfile bakes models under `/models/` and sets these environment variables:
+
+```bash
+LLM_MODEL_PATH=/models/llama-3.1-8b-instruct
 WHISPER_MODEL_NAME=small.en
 WHISPER_DOWNLOAD_ROOT=/models/whisper
-
-# TTS
 OMNIVOICE_MODEL_PATH=/models/omnivoice
 HF_HUB_OFFLINE=1
 ```
 
-For local development (without baked models), these default to HF repo IDs:
-- `LLM_MODEL_PATH=meta-llama/Llama-3.1-8B-Instruct`
-- `WHISPER_MODEL_NAME=small.en` (downloads to cache)
-- `OMNIVOICE_MODEL_PATH=k2-fsa/OmniVoice` (downloads to cache)
-
----
-
-## Concurrency Model
-
-Each worker handles **one active voice session at a time**. The autoscaler creates additional GPU workers for concurrent users rather than multiplexing multiple sessions onto one GPU.
-
-**Key implications:**
-- No request queue or batching logic needed
-- Session state is simple dict keyed by session_id
-- Worker can be reused for sequential sessions (state cleanup on disconnect)
-- No shared mutable state across sessions
-
-See `server.py` for implementation details.
+For local development without baked models, the classes fall back to Hugging Face repo IDs / default whisper model names.

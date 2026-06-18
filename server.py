@@ -1,148 +1,187 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import FileResponse
-from fastapi.middleware.cors import CORSMiddleware
-import tempfile
 import os
-from pathlib import Path
-import shutil
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+from typing import Dict, List
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 
 from stt import STT
 from llm import LLM
 from tts import TTS
 
-app = FastAPI()
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Model loading
+# ---------------------------------------------------------------------------
+# Models are instantiated once at module load time and shared across all
+# sessions. They are stateless with respect to conversation history; per-
+# session state is stored in `sessions` below.
+# ---------------------------------------------------------------------------
+logger.info("Loading models at module import...")
+stt_model = STT()
+llm_model = LLM()
+tts_model = TTS()
+logger.info("All models loaded.")
+
+# ---------------------------------------------------------------------------
+# Per-session state
+# ---------------------------------------------------------------------------
+# CONCURRENCY ASSUMPTION:
+# Each GPU worker is expected to handle one active voice session at a time.
+# The Vast.ai autoscaler spins up additional workers for additional concurrent
+# users, so this app does NOT implement request queuing or batching. However,
+# a worker may be reused for sequential sessions, so we keep session state keyed
+# by session_id and clean it up on disconnect to prevent state leakage.
+# ---------------------------------------------------------------------------
+sessions: Dict[str, Dict] = {}
+session_lock = asyncio.Lock()
+
+
+async def get_history(session_id: str) -> List[dict]:
+    async with session_lock:
+        return list(sessions.get(session_id, {}).get("history", []))
+
+
+async def append_turn(session_id: str, user_text: str, assistant_text: str) -> None:
+    async with session_lock:
+        sess = sessions.setdefault(session_id, {"history": []})
+        sess["history"].append({"role": "user", "content": user_text})
+        sess["history"].append({"role": "assistant", "content": assistant_text})
+
+
+async def remove_session(session_id: str) -> None:
+    async with session_lock:
+        sessions.pop(session_id, None)
+
+
+# ---------------------------------------------------------------------------
+# FastAPI lifespan
+# ---------------------------------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Models are already loaded at module import; this lifespan simply confirms
+    # they are present before reporting the app as healthy.
+    logger.info("Server starting up.")
+    yield
+    logger.info("Server shutting down.")
+
+
+app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"]
+    allow_headers=["*"],
 )
 
-# Global model instances
-models = {
-    "stt": None,
-    "llm": None,
-    "tts": None
-}
 
-# Keep track of turn count for history management
-turn_count = 0
+# ---------------------------------------------------------------------------
+# Health endpoint
+# ---------------------------------------------------------------------------
+@app.get("/health")
+async def health():
+    """Return 200 only once all three models are loaded."""
+    if stt_model is None or llm_model is None or tts_model is None:
+        return {"status": "not_ready"}, 503
+    return {"status": "healthy"}
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Load models when server starts"""
+# ---------------------------------------------------------------------------
+# WebSocket voice pipeline
+# ---------------------------------------------------------------------------
+@app.websocket("/ws/{session_id}")
+async def websocket_endpoint(websocket: WebSocket, session_id: str):
+    await websocket.accept()
+    logger.info(f"[{session_id}] WebSocket connected.")
+
+    # Initialize session history (empty on every new connection)
+    async with session_lock:
+        sessions[session_id] = {"history": []}
+
     try:
-        print("Loading models...")
-        
-        models["stt"] = STT()
-        models["llm"] = LLM()
-        models["tts"] = TTS()
-        
-        print("All models loaded successfully!")
-    except Exception as e:
-        print(f"Error loading models: {str(e)}")
-        raise
+        while True:
+            # 1. Receive audio bytes from the client
+            audio_bytes = await websocket.receive_bytes()
+            logger.info(f"[{session_id}] Received {len(audio_bytes)} audio bytes.")
 
+            if not audio_bytes:
+                logger.warning(f"[{session_id}] Empty audio chunk received, skipping.")
+                continue
 
-@app.post("/chat")
-async def chat(audio_file: UploadFile = File(...)):
-    """
-    Process audio through STT -> LLM -> TTS pipeline
-    
-    Args:
-        audio_file: Audio file (.wav, .mp3, etc.)
-    
-    Returns:
-        JSON with transcription, AI response, and output audio file path
-    """
-    global turn_count
-    
-    try:
-        turn_count += 1
-        
-        # Save uploaded file temporarily
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-            content = await audio_file.read()
-            tmp.write(content)
-            tmp_audio_path = tmp.name
-        
-        try:
-            # STT - Transcribe audio to text
-            print(f"\n[Turn {turn_count} - STT]")
-            text = models["stt"].transcribe(tmp_audio_path)
-            
+            # 2. STT
+            try:
+                text = stt_model.transcribe_bytes(audio_bytes)
+            except Exception as e:
+                logger.exception(f"[{session_id}] STT failed: {e}")
+                await websocket.send_text(f"[STT error: {e}]")
+                continue
+
             if not text:
-                raise HTTPException(
-                    status_code=400,
-                    detail="No speech detected in audio file"
+                logger.info(f"[{session_id}] No speech detected, skipping turn.")
+                await websocket.send_text("[no speech detected]")
+                continue
+
+            logger.info(f"[{session_id}] Transcription: {text}")
+
+            # 3. LLM (with this session's history)
+            try:
+                history = await get_history(session_id)
+                response = llm_model.generate(text, history=history)
+            except Exception as e:
+                logger.exception(f"[{session_id}] LLM generation failed: {e}")
+                await websocket.send_text(f"[LLM error: {e}]")
+                continue
+
+            logger.info(f"[{session_id}] AI: {response}")
+
+            # 4. TTS
+            try:
+                wav_bytes = tts_model.synthesize_for_session(
+                    session_id=session_id,
+                    text=response,
+                    return_wav_bytes=True,
                 )
-            
-            print(f"Transcription: {text}")
-            
-            # LLM - Generate response
-            print(f"\n[Turn {turn_count} - LLM]")
-            use_history = turn_count > 1
-            response = models["llm"].generate(text, use_history=use_history)
-            print(f"AI Response: {response}")
-            
-            # TTS - Synthesize response to audio
-            print(f"\n[Turn {turn_count} - TTS]")
-            output_audio_path = f"output_{turn_count}.wav"
-            models["tts"].synthesize(response, out_path=output_audio_path)
-            
-            print(f"\n[Turn {turn_count} complete]")
-            
-            # Return audio file directly
-            return FileResponse(
-                path=output_audio_path,
-                media_type="audio/wav",
-                filename=f"response_{turn_count}.wav"
+            except Exception as e:
+                logger.exception(f"[{session_id}] TTS failed: {e}")
+                await websocket.send_text(f"[TTS error: {e}]")
+                continue
+
+            logger.info(
+                f"[{session_id}] TTS produced {len(wav_bytes)} bytes of audio."
             )
-            
-        finally:
-            # Clean up temporary audio file
-            if os.path.exists(tmp_audio_path):
-                os.remove(tmp_audio_path)
-    
-    except HTTPException:
-        raise
+
+            # 5. Send audio back
+            await websocket.send_bytes(wav_bytes)
+
+            # 6. Update session history
+            await append_turn(session_id, text, response)
+
+    except WebSocketDisconnect:
+        logger.info(f"[{session_id}] Client disconnected.")
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error processing audio: {str(e)}"
-        )
-
-
-@app.get("/audio/{filename}")
-async def get_audio(filename: str):
-    """Download output audio file"""
-    file_path = Path(filename)
-    
-    # Security check - only allow files in current directory
-    if not file_path.exists() or file_path.is_absolute():
-        raise HTTPException(status_code=404, detail="File not found")
-    
-    return FileResponse(
-        path=file_path,
-        media_type="audio/wav",
-        filename=filename
-    )
-
-
-@app.get("/status")
-async def status():
-    """Check if models are loaded"""
-    return {
-        "models_loaded": all(models.values()),
-        "stt_loaded": models["stt"] is not None,
-        "llm_loaded": models["llm"] is not None,
-        "tts_loaded": models["tts"] is not None,
-        "turn_count": turn_count
-    }
+        logger.exception(f"[{session_id}] Unhandled WebSocket error: {e}")
+        try:
+            await websocket.close(reason=f"server error: {e}")
+        except Exception:
+            pass
+    finally:
+        await remove_session(session_id)
+        logger.info(f"[{session_id}] Session state cleaned up.")
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run(app, host="0.0.0.0", port=port)
