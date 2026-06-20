@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-const DEFAULT_URL = "ws://localhost:8000/ws/demo";
+const DEFAULT_URL = "ws://142.127.68.223:11217/ws/demo";
 
 export default function Home() {
   const [serverUrl, setServerUrl] = useState(DEFAULT_URL);

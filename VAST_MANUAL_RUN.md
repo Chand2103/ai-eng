@@ -44,7 +44,33 @@ apt-get update && apt-get install -y \
     libportaudio2
 ```
 
-## 4. Clone or upload your code
+## 4. Install CUDA 12 toolkit (cuBLAS etc.)
+
+faster-whisper needs the CUDA runtime libraries such as `libcublas.so.12`. Install the CUDA 12 toolkit:
+
+```bash
+wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+dpkg -i cuda-keyring_1.1-1_all.deb
+apt-get update
+apt-get install -y cuda-toolkit-12-1
+```
+
+Then add CUDA to your PATH:
+
+```bash
+export PATH=/usr/local/cuda-12.1/bin${PATH:+:${PATH}}
+export LD_LIBRARY_PATH=/usr/local/cuda-12.1/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
+```
+
+You can also add those two `export` lines to `~/.bashrc` so they persist.
+
+Verify the library is present:
+
+```bash
+ls /usr/local/cuda-12.1/lib64/libcublas.so.12
+```
+
+## 5. Clone or upload your code
 
 Option A — clone from GitHub:
 
@@ -59,7 +85,7 @@ Option B — upload from your local machine (run this on your laptop in Terminal
 scp -P <port> -r c:/dev/AI-eng/* root@<host>:/root/ai-eng/
 ```
 
-## 5. Create a Python virtual environment
+## 6. Create a Python virtual environment
 
 Inside Terminal 1:
 
@@ -69,7 +95,7 @@ source venv/bin/activate
 pip install --upgrade pip
 ```
 
-## 6. Install Python dependencies
+## 7. Install Python dependencies
 
 Inside Terminal 1:
 
@@ -83,12 +109,12 @@ If you hit CUDA version mismatches, install PyTorch manually to match the instan
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 ```
 
-## 7. Log in to Hugging Face
+## 8. Log in to Hugging Face
 
 The Llama model is gated, so you need a token. Inside Terminal 1:
 
 ```bash
-huggingface-cli login --token YOUR_HF_TOKEN
+hf auth login --token YOUR_HF_TOKEN
 ```
 
 Or set it as an env var before running:
@@ -97,7 +123,7 @@ Or set it as an env var before running:
 export HF_TOKEN=YOUR_HF_TOKEN
 ```
 
-## 8. Run the server
+## 9. Run the server
 
 Inside Terminal 1:
 
@@ -115,7 +141,7 @@ Server starting up.
 
 The first run will download the models to the Hugging Face cache (`~/.cache/huggingface/` and `~/.cache/whisper/`). This can take several minutes.
 
-## 9. Test from your local machine
+## 10. Test from your local machine
 
 Make sure Terminal 1 is still running the server and the SSH tunnel is active.
 
@@ -139,12 +165,13 @@ Round-trip latency: X.XXXs
 
 You can then play `response.wav` to hear the AI's reply.
 
-## 10. Iterate
+## 11. Iterate
 
 If you change code, just re-upload the changed files and restart `python server.py`.
 
 ## Common issues
 
+- **`libcublas.so.12 is not found`**: Install the CUDA 12 toolkit (see step 4) and make sure `LD_LIBRARY_PATH` includes `/usr/local/cuda-12.1/lib64`.
 - **Out of memory**: Use a GPU with more VRAM, or for the LLM try `load_in_8bit=True` / `load_in_4bit=True` in `llm.py` (requires `bitsandbytes`).
 - **CUDA mismatch**: Check `nvidia-smi` and `python -c "import torch; print(torch.version.cuda)"`, then reinstall PyTorch for that CUDA version.
 - **Port not reachable / connection refused**: Make sure you used `-L 8000:localhost:8000` in your SSH command in Terminal 1, and that the server is already running on the instance.
@@ -153,3 +180,14 @@ If you change code, just re-upload the changed files and restart `python server.
 ## Next step: Docker/serverless
 
 Once this works, build the Docker image locally or on the instance and test the containerized version before pushing to Vast serverless.
+
+
+------------
+sometimes the pytorch version in the instances doesnt match up with CUDA version, therefore always do this
+1.Uninstall the current version
+  pip uninstall -y torch torchvision torchaudio
+  pip cache purge
+
+2.Install a known good version
+  pip install torch torchvision torchaudio \
+    --index-url https://download.pytorch.org/whl/cu124
