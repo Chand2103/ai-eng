@@ -90,7 +90,7 @@ class TTS:
         return self.synthesize(
             text=text,
             out_path=out_path,
-            ref_audio=ref_audio,
-            ref_text=ref_text,
+            ref_audio="ref-aud.wav",
+            ref_text="Hi, This is alice, how are you doing today?",
             return_wav_bytes=return_wav_bytes,
         )
