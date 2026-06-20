@@ -14,7 +14,6 @@ apt-get update && apt-get install -y \
     libportaudio2
 
 
-
 echo "=== Creating virtual environment ==="
 python3 -m venv venv
 source venv/bin/activate
