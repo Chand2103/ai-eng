@@ -31,5 +31,7 @@ pip install torch torchvision torchaudio \
     --index-url https://download.pytorch.org/whl/cu124
 
 
+echo "=== Hugging Face login ==="
+hf auth login --token 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
 
 echo "=== Setup complete ==="
