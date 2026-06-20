@@ -32,6 +32,11 @@ pip install torch torchvision torchaudio \
     --index-url https://download.pytorch.org/whl/cu124
 
 echo "=== Hugging Face login ==="
-hf auth login --token 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
+if [ -z "$HF_TOKEN" ]; then
+    echo "HF_TOKEN not set. Export it first:"
+    echo "export HF_TOKEN=your_token_here"
+else
+    hf auth login --token "$HF_TOKEN"
+fi
 
 echo "=== Setup complete ==="
