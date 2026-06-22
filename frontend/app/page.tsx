@@ -1,239 +1,98 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
+import { MessageSquare, Theater, GraduationCap, ArrowRight, ChevronRight } from "lucide-react";
+import Button from "@/components/ui/Button";
+import Card from "@/components/ui/Card";
+import { useAuth } from "@/context/AuthContext";
+import { APP_TAGLINE } from "@/lib/constants";
 
-const DEFAULT_URL = "ws://74.48.78.46:58604/ws/demo";
+const FEATURES = [
+  {
+    icon: MessageSquare,
+    title: "Free Talk",
+    description: "Open conversation on any topic",
+    href: "/practice/free-talk",
+  },
+  {
+    icon: Theater,
+    title: "Roleplay",
+    description: "Practice real-life scenarios",
+    href: "/practice/roleplay",
+  },
+  {
+    icon: GraduationCap,
+    title: "IELTS Prep",
+    description: "Targeted exam practice",
+    href: "/practice/ielts",
+  },
+];
 
 export default function Home() {
-  const [serverUrl, setServerUrl] = useState(DEFAULT_URL);
-  const [status, setStatus] = useState("idle");
-  const [transcription, setTranscription] = useState("");
-  const [responseText, setResponseText] = useState("");
-  const [latency, setLatency] = useState<number | null>(null);
+  const { user } = useAuth();
 
-  const wsRef = useRef<WebSocket | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
-  const startTimeRef = useRef<number>(0);
-
-  // Connect once on mount
-  useEffect(() => {
-    connect();
-    return () => {
-      wsRef.current?.close();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const connect = () => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
-
-    setStatus("connecting");
-    const ws = new WebSocket(serverUrl);
-    ws.binaryType = "arraybuffer";
-
-    ws.onopen = () => {
-      setStatus("connected");
-    };
-
-    ws.onmessage = (event) => {
-      if (typeof event.data === "string") {
-        // Server sent a text status/error message
-        if (event.data.startsWith("[STT error")) {
-          setStatus("STT error");
-        } else if (event.data.startsWith("[LLM error")) {
-          setStatus("LLM error");
-        } else if (event.data.startsWith("[TTS error")) {
-          setStatus("TTS error");
-        } else if (event.data === "[no speech detected]") {
-          setStatus("no speech detected");
-        }
-      } else {
-        // Server sent audio bytes
-        const wavBlob = new Blob([event.data], { type: "audio/wav" });
-        const url = URL.createObjectURL(wavBlob);
-        const audio = new Audio(url);
-        audio.play();
-        setLatency((performance.now() - startTimeRef.current) / 1000);
-        setStatus("playing response");
-      }
-    };
-
-    ws.onerror = () => {
-      setStatus("connection error");
-    };
-
-    ws.onclose = () => {
-      setStatus("disconnected");
-      wsRef.current = null;
-    };
-
-    wsRef.current = ws;
-  };
-
-  const startRecording = async () => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
-      connect();
-    }
-
-    audioChunksRef.current = [];
-    setTranscription("");
-    setResponseText("");
-    setLatency(null);
-    setStatus("recording");
-
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
-
-    mediaRecorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        audioChunksRef.current.push(event.data);
-      }
-    };
-
-    mediaRecorder.onstop = async () => {
-      const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-      const arrayBuffer = await audioBlob.arrayBuffer();
-
-      // Server expects WAV bytes. Browsers record WebM, so we convert via
-      // an offline AudioContext to a raw PCM buffer, then wrap it in a WAV
-      // header before sending.
-      const wavBytes = await convertWebmToWav(arrayBuffer);
-
-      startTimeRef.current = performance.now();
-      wsRef.current?.send(wavBytes);
-      setStatus("waiting for response...");
-    };
-
-    mediaRecorder.start();
-    mediaRecorderRef.current = mediaRecorder;
-  };
-
-  const stopRecording = () => {
-    mediaRecorderRef.current?.stop();
-    mediaRecorderRef.current?.stream.getTracks().forEach((t) => t.stop());
-    setStatus("processing");
+  const resolveHref = (href: string) => {
+    if (!user) return `/login?redirect=${encodeURIComponent(href)}`;
+    return href;
   };
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center gap-8 bg-zinc-50 p-6 text-zinc-900">
-      <h1 className="text-3xl font-bold">Voice Agent</h1>
-
-      <div className="flex w-full max-w-md flex-col gap-4">
-        <label className="flex flex-col gap-1 text-sm font-medium">
-          WebSocket URL
-          <input
-            type="text"
-            value={serverUrl}
-            onChange={(e) => setServerUrl(e.target.value)}
-            className="rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"
-          />
-        </label>
-
-        <div className="flex items-center justify-between rounded-lg border border-zinc-200 bg-white px-4 py-3">
-          <span className="text-sm font-medium">Status</span>
-          <span className="text-sm capitalize text-zinc-600">{status}</span>
+    <div className="flex flex-col">
+      {/* Hero */}
+      <section className="relative flex flex-col items-center justify-center overflow-hidden px-4 pt-24 pb-16 text-center sm:pt-32 sm:pb-24">
+        <div className="pointer-events-none absolute inset-0 -top-40 opacity-30">
+          <div className="absolute left-1/2 top-1/2 h-[600px] w-[600px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-[#1A7A5E] opacity-10 blur-3xl animate-hero-pulse" />
         </div>
+        <h1 className="relative max-w-3xl text-4xl font-bold tracking-tight text-[#1A1A18] sm:text-5xl md:text-6xl">
+          {APP_TAGLINE}
+        </h1>
+        <p className="relative mt-4 max-w-xl text-lg text-[#6B6B66] sm:text-xl">
+          AI-powered voice practice — anytime, anywhere.
+        </p>
+        <div className="relative mt-8 flex flex-col items-center gap-3 sm:flex-row">
+          <Link href={resolveHref("/practice")}>
+            <Button variant="primary" className="px-8 py-4 text-base">
+              Start Practising
+            </Button>
+          </Link>
+          <Link href="#features">
+            <Button variant="ghost" className="px-8 py-4 text-base">
+              See how it works
+              <ChevronRight className="h-4 w-4" />
+            </Button>
+          </Link>
+        </div>
+      </section>
 
-        <button
-          onMouseDown={startRecording}
-          onMouseUp={stopRecording}
-          onTouchStart={startRecording}
-          onTouchEnd={stopRecording}
-          className="rounded-full bg-blue-600 px-6 py-4 text-lg font-semibold text-white shadow transition hover:bg-blue-700 active:scale-95"
-        >
-          Hold to Speak
-        </button>
+      {/* Feature cards */}
+      <section id="features" className="mx-auto w-full max-w-6xl px-4 pb-20 sm:px-6">
+        <div className="grid gap-6 sm:grid-cols-3">
+          {FEATURES.map((feature) => {
+            const Icon = feature.icon;
+            return (
+              <Link key={feature.title} href={resolveHref(feature.href)}>
+                <Card hover className="group h-full">
+                  <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-[#E1F5EE]">
+                    <Icon className="h-6 w-6 text-[#1A7A5E]" />
+                  </div>
+                  <h3 className="text-lg font-semibold text-[#1A1A18]">{feature.title}</h3>
+                  <p className="mt-1 text-sm text-[#6B6B66]">{feature.description}</p>
+                  <div className="mt-4 flex items-center gap-1 text-sm font-medium text-[#1A7A5E]">
+                    Learn more <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
+                  </div>
+                </Card>
+              </Link>
+            );
+          })}
+        </div>
+      </section>
 
-        {latency !== null && (
-          <p className="text-center text-sm text-zinc-600">
-            Round-trip latency: {latency.toFixed(2)}s
-          </p>
-        )}
-
-        {transcription && (
-          <div className="rounded-lg border border-zinc-200 bg-white p-4">
-            <p className="text-xs font-semibold uppercase text-zinc-500">You said</p>
-            <p className="text-sm">{transcription}</p>
-          </div>
-        )}
-
-        {responseText && (
-          <div className="rounded-lg border border-zinc-200 bg-white p-4">
-            <p className="text-xs font-semibold uppercase text-zinc-500">AI</p>
-            <p className="text-sm">{responseText}</p>
-          </div>
-        )}
-      </div>
-    </main>
+      {/* Social proof */}
+      <section className="border-t border-[#E2E2DC] bg-white py-12">
+        <p className="text-center text-sm font-medium text-[#6B6B66]">
+          Trusted by <span className="text-[#1A1A18]">10,000+</span> learners worldwide
+        </p>
+      </section>
+    </div>
   );
-}
-
-/**
- * Convert a WebM/Opus ArrayBuffer to a mono 16-bit PCM WAV ArrayBuffer.
- * The server (faster-whisper) accepts WAV bytes, so this client-side
- * conversion avoids forcing the backend to decode WebM.
- */
-async function convertWebmToWav(webmBuffer: ArrayBuffer): Promise<ArrayBuffer> {
-  const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-  const audioBuffer = await audioCtx.decodeAudioData(webmBuffer.slice(0));
-
-  // Mix to mono and resample to 16 kHz (whisper's preferred rate).
-  const targetSampleRate = 16000;
-  const offlineCtx = new OfflineAudioContext(
-    1,
-    Math.ceil(audioBuffer.duration * targetSampleRate),
-    targetSampleRate
-  );
-  const source = offlineCtx.createBufferSource();
-  source.buffer = audioBuffer;
-  source.connect(offlineCtx.destination);
-  source.start();
-
-  const rendered = await offlineCtx.startRendering();
-  const samples = rendered.getChannelData(0);
-
-  // Float32 -> 16-bit PCM
-  const pcm = new Int16Array(samples.length);
-  for (let i = 0; i < samples.length; i++) {
-    const s = Math.max(-1, Math.min(1, samples[i]));
-    pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-  }
-
-  return encodeWav(pcm, targetSampleRate, 1);
-}
-
-function encodeWav(
-  samples: Int16Array,
-  sampleRate: number,
-  numChannels: number
-): ArrayBuffer {
-  const buffer = new ArrayBuffer(44 + samples.length * 2);
-  const view = new DataView(buffer);
-
-  const writeString = (offset: number, str: string) => {
-    for (let i = 0; i < str.length; i++) {
-      view.setUint8(offset + i, str.charCodeAt(i));
-    }
-  };
-
-  writeString(0, "RIFF");
-  view.setUint32(4, 36 + samples.length * 2, true);
-  writeString(8, "WAVE");
-  writeString(12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true); // PCM
-  view.setUint16(22, numChannels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * numChannels * 2, true);
-  view.setUint16(32, numChannels * 2, true);
-  view.setUint16(34, 16, true); // bits per sample
-  writeString(36, "data");
-  view.setUint32(40, samples.length * 2, true);
-
-  for (let i = 0; i < samples.length; i++) {
-    view.setInt16(44 + i * 2, samples[i], true);
-  }
-
-  return buffer;
 }

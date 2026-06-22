@@ -7,7 +7,6 @@ from typing import Dict, List
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from stt import STT
 from llm import LLM
 from tts import TTS
 
@@ -28,7 +27,6 @@ logger = logging.getLogger(__name__)
 # session state is stored in `sessions` below.
 # ---------------------------------------------------------------------------
 logger.info("Loading models at module import...")
-stt_model = STT()
 llm_model = LLM()
 tts_model = TTS()
 logger.info("All models loaded.")
@@ -91,8 +89,8 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 @app.get("/health")
 async def health():
-    """Return 200 only once all three models are loaded."""
-    if stt_model is None or llm_model is None or tts_model is None:
+    """Return 200 only once all models are loaded."""
+    if llm_model is None or tts_model is None:
         return {"status": "not_ready"}, 503
     return {"status": "healthy"}
 
@@ -111,30 +109,26 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
     try:
         while True:
-            # 1. Receive audio bytes from the client
-            audio_bytes = await websocket.receive_bytes()
-            logger.info(f"[{session_id}] Received {len(audio_bytes)} audio bytes.")
+            # 1. Receive transcript text from the orchestrator
+            data = await websocket.receive_bytes()
+            logger.info(f"[{session_id}] Received {len(data)} bytes (transcript).")
 
-            if not audio_bytes:
-                logger.warning(f"[{session_id}] Empty audio chunk received, skipping.")
+            if not data or len(data) < 4:
+                logger.warning(f"[{session_id}] Invalid data received, skipping.")
                 continue
 
-            # 2. STT
-            try:
-                text = stt_model.transcribe_bytes(audio_bytes)
-            except Exception as e:
-                logger.exception(f"[{session_id}] STT failed: {e}")
-                await websocket.send_text(f"[STT error: {e}]")
-                continue
+            # Parse: first 4 bytes = text length, rest = text
+            text_length = int.from_bytes(data[:4], "little")
+            text = data[4:4+text_length].decode("utf-8")
 
             if not text:
-                logger.info(f"[{session_id}] No speech detected, skipping turn.")
+                logger.info(f"[{session_id}] Empty transcript received, skipping turn.")
                 await websocket.send_text("[no speech detected]")
                 continue
 
             logger.info(f"[{session_id}] Transcription: {text}")
 
-            # 3. LLM (with this session's history)
+            # 2. LLM (with this session's history)
             try:
                 history = await get_history(session_id)
                 response = llm_model.generate(text, history=history)
@@ -145,7 +139,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
             logger.info(f"[{session_id}] AI: {response}")
 
-            # 4. TTS
+            # 3. TTS
             try:
                 wav_bytes = tts_model.synthesize_for_session(
                     session_id=session_id,
@@ -161,10 +155,10 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 f"[{session_id}] TTS produced {len(wav_bytes)} bytes of audio."
             )
 
-            # 5. Send audio back
+            # 4. Send audio back
             await websocket.send_bytes(wav_bytes)
 
-            # 6. Update session history
+            # 5. Update session history
             await append_turn(session_id, text, response)
 
     except WebSocketDisconnect:
