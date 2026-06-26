@@ -6,13 +6,17 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from dotenv import load_dotenv
-import websockets
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from amazon_transcribe.client import TranscribeStreamingClient
 from amazon_transcribe.handlers import TranscriptResultStreamHandler
 from amazon_transcribe.model import TranscriptEvent
+
+try:
+    from .backends import create_backend  # when imported as part of the package
+except ImportError:
+    from backends import create_backend   # when run directly as a script
 
 # Load environment variables from .env file
 load_dotenv()
@@ -143,34 +147,10 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     await websocket.accept()
     logger.info(f"[{session_id}] Frontend connected to orchestrator.")
 
-    vast_url = os.getenv("VAST_SERVER_URL", "ws://localhost:10100/ws/orchestrator")
+    backend = create_backend(session_id)
 
     try:
-        # Maintain persistent connection to vast.ai server for this session
-        # logger.info(f"[{session_id}] Establishing persistent connection to vast.ai server at {vast_url}")
-        # async with websockets.connect(vast_url) as vast_ws:
-
-        #     # Task to listen for responses from vast.ai and forward to frontend
-        #     async def forward_responses():
-        #         try:
-        #             while True:
-        #                 response = await vast_ws.recv()
-        #                 if isinstance(response, bytes):
-        #                     # Forward audio bytes back to frontend
-        #                     logger.info(f"[{session_id}] Forwarding {len(response)} bytes of TTS audio to frontend.")
-        #                     await websocket.send_bytes(response)
-        #                 elif isinstance(response, str):
-        #                     # Forward text messages (errors, etc.)
-        #                     logger.info(f"[{session_id}] Forwarding message from vast.ai: {response}")
-        #                     await websocket.send_text(response)
-        #         except Exception as e:
-        #             logger.error(f"[{session_id}] Error forwarding from vast.ai: {e}")
-
-        #     # Start the response forwarding task
-        #     forward_task = asyncio.create_task(forward_responses())
-
-        # TEST MODE: Running without vast.ai connection
-        forward_task = None
+        await backend.connect(session_id)
 
         # Main loop: handle multiple recording sessions
         while True:
@@ -187,14 +167,14 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     # Empty chunk or very small chunk = end of audio
                     if not pcm_chunk or len(pcm_chunk) < 16:
                         logger.info(f"[{session_id}] Received end-of-audio marker.")
-                        
+
                         if first_chunk_received and transcription_task:
                             # Queue-monitoring approach: wait for transcription stream to drain remaining chunks
                             logger.info(f"[{session_id}] Monitoring queue for pending chunks...")
                             start_drain = time.time()
                             drain_window = 0.3  # 300ms max drain time
                             last_queue_size = pcm_queue.qsize()
-                            
+
                             while time.time() - start_drain < drain_window:
                                 await asyncio.sleep(0.05)  # Check every 50ms
                                 current_size = pcm_queue.qsize()
@@ -205,30 +185,27 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                                 last_queue_size = current_size
                             else:
                                 logger.info(f"[{session_id}] Drain timeout after 300ms, proceeding with end-of-audio.")
-                            
+
                             # Signal end of audio to transcription task
                             await pcm_queue.put(None)
                             logger.info(f"[{session_id}] Waiting for transcription to complete...")
                             transcript_text = await transcription_task
-                            
+
                             if not transcript_text:
                                 logger.warning(f"[{session_id}] No speech detected or transcription failed.")
                                 await websocket.send_text("[no speech detected]")
                             else:
                                 logger.info(f"[{session_id}] Transcript: {transcript_text}")
-
-                                # Send transcript to vast.ai server
-                                logger.info(f"[{session_id}] Sending transcript to vast.ai: {transcript_text}")
-
-                                # Format: 4 bytes length (little-endian) + UTF-8 text
-                                transcript_bytes = transcript_text.encode("utf-8")
-                                transcript_packet = len(transcript_bytes).to_bytes(4, "little") + transcript_bytes
-
-                                # await vast_ws.send(transcript_packet)
-                                # Uncomment above when vast.ai is ready
+                                async for result in backend.send_transcript(transcript_text):
+                                    if isinstance(result, bytes):
+                                        logger.info(f"[{session_id}] Forwarding {len(result)} bytes of TTS audio to frontend.")
+                                        await websocket.send_bytes(result)
+                                    elif isinstance(result, str):
+                                        logger.info(f"[{session_id}] Forwarding message from backend: {result}")
+                                        await websocket.send_text(result)
                         else:
                             logger.warning(f"[{session_id}] End-of-audio without any audio chunks received.")
-                        
+
                         break  # Break inner loop to wait for next recording session
 
                     # First chunk received - lazy start transcription
@@ -247,8 +224,6 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     if first_chunk_received and transcription_task:
                         # Signal end of audio
                         await pcm_queue.put(None)
-                    if forward_task:
-                        forward_task.cancel()
                     return
 
     except WebSocketDisconnect:
@@ -259,6 +234,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             await websocket.close(reason=f"orchestrator error: {e}")
         except Exception:
             pass
+    finally:
+        await backend.close()
 
 
 if __name__ == "__main__":
