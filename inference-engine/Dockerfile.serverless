@@ -57,14 +57,11 @@ COPY inference-engine/ref-aud.wav .
 # COPY inference-engine/ref-aud2.wav .   # uncomment when voice 2 is added
 
 # ------------------------------------------------------------------
-# Pre-download OmniVoice model weights (optional — speeds up cold
-# start; comment out if you rely on OMNIVOICE_MODEL_PATH env var)
+# Pre-download OmniVoice model weights (optional — uncomment to speed
+# up cold start; comment out if you rely on OMNIVOICE_MODEL_PATH env
+# var for a custom model path)
 # ------------------------------------------------------------------
-RUN python -c "
-from omnivoice import OmniVoice
-import torch
-OmniVoice.from_pretrained('k2-fsa/OmniVoice', device_map='cuda:0', dtype=torch.float16)
-"
+# RUN python -c "from omnivoice import OmniVoice; import torch; OmniVoice.from_pretrained('k2-fsa/OmniVoice', device_map='cuda:0', dtype=torch.float16)"
 
 # ------------------------------------------------------------------
 # Entrypoint: the worker starts the TTS server internally and then
