@@ -1,0 +1,73 @@
+# syntax=docker/dockerfile:1
+# ---------------------------------------------------------------------------
+# Inference-Engine TTS — Vast.ai serverless worker
+#
+# Build:
+#   docker build -f Dockerfile.serverless \
+#     --secret id=hf_token,env=HF_TOKEN \
+#     -t your-registry/inference-tts:latest .
+#
+# Run (local test):
+#   docker run --gpus all -p 8080:8080 -e HF_TOKEN=$HF_TOKEN \
+#     inference-tts:latest python tts_server.py
+#
+# Deploy to Vast: see deploy/ scripts.
+# ---------------------------------------------------------------------------
+
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+
+# ------------------------------------------------------------------
+# System dependencies (ffmpeg for audio codecs, libsndfile for
+# soundfile, libportaudio for OmniVoice)
+# ------------------------------------------------------------------
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    libsndfile1 \
+    libportaudio2 \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# ------------------------------------------------------------------
+# Python dependencies
+# ------------------------------------------------------------------
+WORKDIR /app
+
+# Copy only the requirements file first for better layer caching
+COPY inference-engine/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir vastai
+
+# ------------------------------------------------------------------
+# Application code (TTS server + worker)
+# ------------------------------------------------------------------
+COPY inference-engine/tts.py .
+COPY inference-engine/tts_server.py .
+COPY inference-engine/worker.py .
+
+# ------------------------------------------------------------------
+# Reference audio files (looked up by voice_id in tts.py VOICES dict)
+# ------------------------------------------------------------------
+# Each voice in the VOICES registry expects its .wav file at CWD.
+# Add entries to tts.py's VOICES dict for any new files placed here.
+#
+#   ref-aud.wav   → voice_id=1  (Alice / default)
+#   ref-aud2.wav  → voice_id=2  (uncomment in tts.py VOICES when ready)
+# ------------------------------------------------------------------
+COPY inference-engine/ref-aud.wav .
+# COPY inference-engine/ref-aud2.wav .   # uncomment when voice 2 is added
+
+# ------------------------------------------------------------------
+# Pre-download OmniVoice model weights (optional — speeds up cold
+# start; comment out if you rely on OMNIVOICE_MODEL_PATH env var)
+# ------------------------------------------------------------------
+RUN python -c "
+from omnivoice import OmniVoice
+import torch
+OmniVoice.from_pretrained('k2-fsa/OmniVoice', device_map='cuda:0', dtype=torch.float16)
+"
+
+# ------------------------------------------------------------------
+# Entrypoint: the worker starts the TTS server internally and then
+# registers with Vast.
+# ------------------------------------------------------------------
+CMD ["python", "worker.py"]
