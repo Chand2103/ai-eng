@@ -9,7 +9,7 @@ from .openrouter_llm import OpenRouterLLM
 
 logger = logging.getLogger(__name__)
 
-VAST_ROUTE_URL = "https://console.vast.ai/api/v0/route/"
+VAST_ROUTE_URL = "https://run.vast.ai/route/"
 
 
 class VastServerlessTTSBackend(ConversationBackend):
@@ -127,10 +127,14 @@ class VastServerlessTTSBackend(ConversationBackend):
                     "Authorization": f"Bearer {self.vast_api_key}",
                     "Content-Type": "application/json",
                 },
-                json={"endpoint_name": self.endpoint_name},
+                json={"endpoint": self.endpoint_name, "cost": 100},
             )
             resp.raise_for_status()
             data = resp.json()
+            if "url" not in data:
+                raise RuntimeError(
+                    f"No worker available – endpoint status: {data.get('status', '?')}"
+                )
             url: str = data["url"].rstrip("/")
             auth: str = data.get("authorization", "")
             return url, auth

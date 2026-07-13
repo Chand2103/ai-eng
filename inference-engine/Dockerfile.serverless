@@ -57,11 +57,17 @@ COPY inference-engine/ref-aud.wav .
 # COPY inference-engine/ref-aud2.wav .   # uncomment when voice 2 is added
 
 # ------------------------------------------------------------------
-# Pre-download OmniVoice model weights (optional — uncomment to speed
-# up cold start; comment out if you rely on OMNIVOICE_MODEL_PATH env
-# var for a custom model path)
+# Pre-download OmniVoice model weights into the image so every cold
+# start skips the HuggingFace download (~30s saved).
 # ------------------------------------------------------------------
-# RUN python -c "from omnivoice import OmniVoice; import torch; OmniVoice.from_pretrained('k2-fsa/OmniVoice', device_map='cuda:0', dtype=torch.float16)"
+RUN python -c "from omnivoice import OmniVoice; import torch; OmniVoice.from_pretrained('k2-fsa/OmniVoice', device_map='cuda:0', dtype=torch.float16)"
+
+# ------------------------------------------------------------------
+# Expose PyWorker port (Vast routes requests here).  The WORKER_PORT
+# env var tells the PyWorker SDK what port to listen on.
+# ------------------------------------------------------------------
+ENV WORKER_PORT=3000
+EXPOSE 3000
 
 # ------------------------------------------------------------------
 # Entrypoint: the worker starts the TTS server internally and then

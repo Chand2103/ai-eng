@@ -1,24 +1,4 @@
 #!/usr/bin/env python3
-"""
-Vast.ai PyWorker for the inference-engine TTS server.
-
-This script is the **entrypoint** of the serverless Docker image.  It:
-
-1. Starts the TTS HTTP server (``tts_server.py``) as a subprocess on port 8080.
-2. Blocks until the server prints ``OmniVoice loaded``.
-3. Launches the Vast PyWorker which registers with Vast's infrastructure and
-   proxies /tts requests to the local server.
-
-Usage (inside the container)::
-
-    python worker.py
-
-Environment variables
----------------------
-TTS_SERVER_PORT    Port for the TTS HTTP server (default 8080).
-WORKER_PORT        Port for the Vast worker to listen on (default 8081).
-"""
-
 import os
 import sys
 import time
@@ -32,72 +12,69 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 TTS_SERVER_PORT = int(os.getenv("TTS_SERVER_PORT", "8080"))
+TTS_LOG_FILE = os.getenv("TTS_LOG_FILE", "/tmp/tts_server.log")
 
 
 def start_tts_server() -> subprocess.Popen:
-    """Launch ``tts_server.py`` and return the process handle."""
     logger.info("Starting TTS server...")
+    log_fh = open(TTS_LOG_FILE, "wb")
     proc = subprocess.Popen(
         [
-            sys.executable,
-            "-m",
-            "uvicorn",
+            sys.executable, "-m", "uvicorn",
             "tts_server:app",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            str(TTS_SERVER_PORT),
-            "--log-level",
-            "info",
+            "--host", "0.0.0.0",
+            "--port", str(TTS_SERVER_PORT),
+            "--log-level", "info",
         ],
-        stdout=subprocess.PIPE,
+        stdout=log_fh,
         stderr=subprocess.STDOUT,
     )
     return proc
 
 
-def wait_for_ready(proc: subprocess.Popen, marker: str = "OmniVoice loaded") -> None:
-    """Read server stdout until *marker* appears, then return."""
-    for line in iter(proc.stdout.readline, b""):
-        decoded = line.decode(errors="replace").rstrip()
-        print(decoded)
-        if marker in decoded:
-            logger.info("TTS server is ready.")
-            return
+def wait_for_ready(marker: str = "OmniVoice loaded", timeout: int = 300) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if os.path.exists(TTS_LOG_FILE):
+            with open(TTS_LOG_FILE, "r") as f:
+                content = f.read()
+                if marker in content:
+                    logger.info("TTS server is ready.")
+                    return
+        time.sleep(1)
+    raise RuntimeError(f"TTS server did not print '{marker}' within {timeout}s")
 
 
 def main():
-    # 1. Start the TTS server
-    server_proc = start_tts_server()
+    start_tts_server()
+    wait_for_ready()
 
-    # 2. Wait for model load to finish
-    wait_for_ready(server_proc)
-
-    # 3. Start Vast PyWorker (blocking)
     from vastai import Worker, WorkerConfig, HandlerConfig, BenchmarkConfig, LogActionConfig
 
     handler = HandlerConfig(
         route="/tts",
-        method="POST",
-        health_route="/health",
+        allow_parallel_requests=False,
+        workload_calculator=lambda payload: float(len(payload.get("text", ""))),
+        benchmark_config=BenchmarkConfig(
+            generator=lambda: {
+                "text": "Hello, this is a benchmark test for the TTS system.",
+                "ref_audio": "ref-aud.wav",
+                "ref_text": "Hi, This is alice, how are you doing today?",
+                "voice_id": 1,
+            },
+            runs=4,
+            concurrency=1,
+        ),
     )
-
-    benchmark = BenchmarkConfig(
-        generator_payload={
-            "text": "Hello, this is a benchmark test for the TTS system.",
-            "ref_audio": "ref-aud.wav",
-            "ref_text": "Hi, This is alice, how are you doing today?",
-            "voice_id": 1,
-        },
-        workload_calculator=lambda payload: len(payload.get("text", "")),
-    )
-
-    log_action = LogActionConfig(on_load="OmniVoice loaded")
 
     config = WorkerConfig(
+        model_server_url="http://127.0.0.1",
+        model_server_port=TTS_SERVER_PORT,
+        model_log_file=TTS_LOG_FILE,
         handlers=[handler],
-        benchmark=benchmark,
-        log_action=log_action,
+        log_action_config=LogActionConfig(
+            on_load="OmniVoice loaded",
+        ),
     )
 
     logger.info("Starting Vast PyWorker...")
