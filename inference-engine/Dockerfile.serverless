@@ -60,7 +60,7 @@ COPY inference-engine/ref-aud.wav .
 # Pre-download OmniVoice model weights into the image so every cold
 # start skips the HuggingFace download (~30s saved).
 # ------------------------------------------------------------------
-RUN python -c "from omnivoice import OmniVoice; import torch; OmniVoice.from_pretrained('k2-fsa/OmniVoice', device_map='cuda:0', dtype=torch.float16)"
+RUN python -c "from omnivoice import OmniVoice; import torch; OmniVoice.from_pretrained('k2-fsa/OmniVoice', device_map='cpu')"
 
 # ------------------------------------------------------------------
 # Expose PyWorker port (Vast routes requests here).  The WORKER_PORT
