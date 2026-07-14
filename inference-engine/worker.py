@@ -32,9 +32,14 @@ def start_tts_server() -> subprocess.Popen:
     return proc
 
 
-def wait_for_ready(marker: str = "OmniVoice loaded", timeout: int = 300) -> None:
+def wait_for_ready(proc: subprocess.Popen, marker: str = "OmniVoice loaded", timeout: int = 600) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        ret = proc.poll()
+        if ret is not None:
+            logger.error("TTS server exited prematurely (code %s). Dumping log:", ret)
+            _dump_log()
+            raise RuntimeError(f"TTS server exited with code {ret} before printing '{marker}'")
         if os.path.exists(TTS_LOG_FILE):
             with open(TTS_LOG_FILE, "r") as f:
                 content = f.read()
@@ -42,12 +47,21 @@ def wait_for_ready(marker: str = "OmniVoice loaded", timeout: int = 300) -> None
                     logger.info("TTS server is ready.")
                     return
         time.sleep(1)
+    logger.error("TTS server did not become ready within %ss. Dumping log:", timeout)
+    _dump_log()
     raise RuntimeError(f"TTS server did not print '{marker}' within {timeout}s")
 
 
+def _dump_log() -> None:
+    if os.path.exists(TTS_LOG_FILE):
+        with open(TTS_LOG_FILE, "r") as f:
+            for line in f.readlines()[-50:]:
+                logger.error("  | %s", line.rstrip())
+
+
 def main():
-    start_tts_server()
-    wait_for_ready()
+    proc = start_tts_server()
+    wait_for_ready(proc)
 
     from vastai import Worker, WorkerConfig, HandlerConfig, BenchmarkConfig, LogActionConfig
 

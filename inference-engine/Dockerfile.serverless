@@ -57,10 +57,16 @@ COPY inference-engine/ref-aud.wav .
 # COPY inference-engine/ref-aud2.wav .   # uncomment when voice 2 is added
 
 # ------------------------------------------------------------------
+# Explicit HuggingFace cache so pre-downloaded weights are found at
+# runtime regardless of the HF library version.
+# ------------------------------------------------------------------
+ENV HF_HOME=/app/hf_cache
+
+# ------------------------------------------------------------------
 # Pre-download OmniVoice model weights into the image so every cold
 # start skips the HuggingFace download (~30s saved).
 # ------------------------------------------------------------------
-RUN python -c "from omnivoice import OmniVoice; import torch; OmniVoice.from_pretrained('k2-fsa/OmniVoice', device_map='cpu')"
+RUN python -c "from omnivoice import OmniVoice; import torch; OmniVoice.from_pretrained('k2-fsa/OmniVoice', device_map='cpu', dtype=torch.float16)"
 
 # ------------------------------------------------------------------
 # Expose PyWorker port (Vast routes requests here).  The WORKER_PORT

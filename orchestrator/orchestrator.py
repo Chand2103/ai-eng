@@ -151,6 +151,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
 
     try:
         await backend.connect(session_id)
+        asyncio.create_task(backend.warmup())
 
         # Main loop: handle multiple recording sessions
         while True:

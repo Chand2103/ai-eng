@@ -43,14 +43,45 @@ class VastServerlessTTSBackend(ConversationBackend):
             self.voice_id = int(os.getenv("TTS_VOICE_ID"))
 
         self._session_id: str | None = None
+        self._request_counter = 0
 
     # ------------------------------------------------------------------
     # ConversationBackend interface
     # ------------------------------------------------------------------
     async def connect(self, session_id: str) -> None:
         self._session_id = session_id
+        self._request_counter = 0
         await self.llm.connect(session_id)
         logger.info(f"[{session_id}] VastServerlessTTS session initialised.")
+
+    async def warmup(self) -> None:
+        """
+        Send a dummy TTS request at session start to trigger a cold start
+        on Vast if no worker is ready yet.
+        """
+        session_id = self._session_id
+        logger.info(f"[{session_id}] Warm-up: sending dummy TTS request...")
+        try:
+            worker_url, auth_data = await self._route_to_worker()
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    f"{worker_url}/tts",
+                    json={
+                        "auth_data": auth_data,
+                        "payload": {
+                            "text": "Hello",
+                            "ref_audio": "ref-aud.wav",
+                            "ref_text": "Hi, This is alice, how are you doing today?",
+                            "voice_id": self.voice_id or 1,
+                        },
+                    },
+                )
+                if resp.is_success:
+                    logger.info(f"[{session_id}] Warm-up succeeded ({len(resp.content)} bytes).")
+                else:
+                    logger.info(f"[{session_id}] Warm-up responded {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            logger.info(f"[{session_id}] Warm-up triggered cold start: {e}")
 
     async def send_transcript(self, text: str) -> AsyncIterator[Union[bytes, str]]:
         session_id = self._session_id
@@ -59,17 +90,26 @@ class VastServerlessTTSBackend(ConversationBackend):
             return
 
         # 1. LLM (shared OpenRouterLLM — same as OpenRouterBackend)
-        assistant_text = await self.llm.generate(session_id, text)
-        if assistant_text is None:
+        result = await self.llm.generate(session_id, text)
+        if result is None:
             yield "[LLM error]"
             return
 
-        # 2. Persist conversation turn
-        await self.llm.append_turn(session_id, text, assistant_text)
+        full_response = result.get("full_response", "")
+        advice = result.get("advice", "")
+        logger.info(f"[{session_id}] full_response: {full_response}")
+        logger.info(f"[{session_id}] advice: {advice}")
 
-        # 3. Call Vast serverless TTS
+        # 2. Persist conversation turn
+        await self.llm.append_turn(session_id, text, result)
+
+        # 3. Send advice text to frontend
+        if advice:
+            yield advice
+
+        # 4. Call Vast serverless TTS
         try:
-            worker_url, auth_header = await self._route_to_worker()
+            worker_url, auth_data = await self._route_to_worker()
         except Exception as e:
             logger.exception(f"[{session_id}] Failed to get Vast worker URL: {e}")
             yield f"[TTS error: {e}]"
@@ -79,15 +119,14 @@ class VastServerlessTTSBackend(ConversationBackend):
             async with httpx.AsyncClient(timeout=60.0) as client:
                 tts_response = await client.post(
                     f"{worker_url}/tts",
-                    headers={
-                        "Authorization": auth_header,
-                        "Content-Type": "application/json",
-                    },
                     json={
-                        "text": assistant_text,
-                        "ref_audio": "ref-aud.wav",
-                        "ref_text": "Hi, This is alice, how are you doing today?",
-                        "voice_id": self.voice_id,
+                        "auth_data": auth_data,
+                        "payload": {
+                            "text": full_response,
+                            "ref_audio": "ref-aud.wav",
+                            "ref_text": "Hi, This is alice, how are you doing today?",
+                            "voice_id": self.voice_id,
+                        },
                     },
                 )
                 tts_response.raise_for_status()
@@ -110,15 +149,14 @@ class VastServerlessTTSBackend(ConversationBackend):
     # ------------------------------------------------------------------
     # Internal — Vast route resolution
     # ------------------------------------------------------------------
-    async def _route_to_worker(self) -> tuple[str, str]:
+    async def _route_to_worker(self) -> tuple[str, dict]:
         """
-        Call Vast's ``/api/v0/route/`` endpoint to obtain a live worker URL
-        and its auth token for this session.
+        Call Vast's ``/route/`` endpoint to obtain a live worker URL and
+        ``auth_data`` dict for the PyWorker ``{auth_data, payload}`` wrapper.
 
         Returns
         -------
-        (worker_url, auth_header)
-            e.g. ``("https://worker-xxx.vast.ai/", "Bearer xxx")``
+        (worker_url, auth_data)
         """
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
@@ -136,5 +174,13 @@ class VastServerlessTTSBackend(ConversationBackend):
                     f"No worker available – endpoint status: {data.get('status', '?')}"
                 )
             url: str = data["url"].rstrip("/")
-            auth: str = data.get("authorization", "")
-            return url, auth
+            self._request_counter += 1
+            auth_data = {
+                "signature": data["signature"],
+                "cost": data.get("cost", 100),
+                "endpoint": data.get("endpoint", self.endpoint_name),
+                "reqnum": data["reqnum"],
+                "url": data["url"],
+                "request_idx": self._request_counter,
+            }
+            return url, auth_data

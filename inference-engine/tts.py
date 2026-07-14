@@ -25,10 +25,10 @@ VOICES: dict[int, dict[str, str]] = {
         "ref_audio": "ref-aud.wav",
         "ref_text": "Hi, This is alice, how are you doing today?",
     },
-    # 2: {
-    #     "ref_audio": "ref-aud2.wav",
-    #     "ref_text": "The transcript of the second reference voice.",
-    # },
+    2: {
+        "ref_audio": "ref-aud2.wav",
+        "ref_text": "ශ්‍රී ලංකාව තුල ආයෝජනය සහ නව ව්‍යාපාරික අවස්තා ගවේශනය කිරීමට පැමිනෙන්නැයි",
+    },
 }
 
 

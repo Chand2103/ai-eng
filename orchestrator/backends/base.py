@@ -10,6 +10,14 @@ class ConversationBackend(ABC):
         """Open any persistent connections and initialise session state."""
         ...
 
+    async def warmup(self) -> None:
+        """
+        Optional warm-up / keep-alive: send a dummy request at session start
+        to trigger a cold start if no worker is ready.
+
+        Default is a no-op.  Override in backends that need it.
+        """
+
     @abstractmethod
     async def send_transcript(self, text: str) -> AsyncIterator[Union[bytes, str]]:
         """

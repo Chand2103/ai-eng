@@ -53,16 +53,25 @@ class OpenRouterBackend(ConversationBackend):
             return
 
         # 1. LLM (delegated to shared module)
-        assistant_text = await self.llm.generate(session_id, text)
-        if assistant_text is None:
+        result = await self.llm.generate(session_id, text)
+        if result is None:
             yield "[LLM error]"
             return
 
-        # 2. Persist conversation turn
-        await self.llm.append_turn(session_id, text, assistant_text)
+        full_response = result.get("full_response", "")
+        advice = result.get("advice", "")
+        logger.info(f"[{session_id}] full_response: {full_response}")
+        logger.info(f"[{session_id}] advice: {advice}")
 
-        # 3. OpenRouter TTS
-        async for audio_bytes in self._call_tts(session_id, assistant_text):
+        # 2. Persist conversation turn
+        await self.llm.append_turn(session_id, text, result)
+
+        # 3. Send advice text to frontend
+        if advice:
+            yield advice
+
+        # 4. OpenRouter TTS
+        async for audio_bytes in self._call_tts(session_id, full_response):
             yield audio_bytes
 
     async def close(self) -> None:

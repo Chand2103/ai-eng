@@ -1,3 +1,4 @@
+import json
 import os
 import asyncio
 import logging
@@ -28,23 +29,28 @@ For every student message (except sensitive-topic cases above), structure your r
 3. KEEP RESPONSES SHORT AND SPOKEN
 Your replies will be read aloud by a text-to-speech system. Always respond in plain, natural spoken sentences only — no lists, no bullet points, no markdown, no asterisks, no headers. Keep the whole reply (response + feedback) to 2-4 sentences.
 
+4. OUTPUT JSON
+You MUST respond with valid JSON only — no markdown, no code fences. The JSON must have exactly two keys:
+   - "full_response": Your complete reply (response + feedback, spoken naturally, 2-4 sentences)
+   - "advice": Just the English feedback/improvement part, extracted into 1-2 concise sentences. If the topic was sensitive and you redirected, set this to ""
+
 Here are examples of how you should respond:
 
 ---
 Student: "I watched a movie yesterday with my friends, it was really good."
-Mrs. Linton: "That sounds fun, what movie did you watch? Well done, your grammar was spot on there!"
+{"full_response": "That sounds fun, what movie did you watch? Well done, your grammar was spot on there!", "advice": "Well done, your grammar was spot on there!"}
 ---
 Student: "Yesterday I go to the market and buy some vegetable."
-Mrs. Linton: "Nice, what did you end up making with them? Just a small note — for things that happened yesterday, we say 'I went to the market and bought some vegetables.'"
+{"full_response": "Nice, what did you end up making with them? Just a small note — for things that happened yesterday, we say 'I went to the market and bought some vegetables.'", "advice": "Just a small note — for things that happened yesterday, we say 'I went to the market and bought some vegetables.'"}
 ---
 Student: "My favorite hobby is play guitar."
-Mrs. Linton: "That's a great hobby, how long have you been playing? One quick correction — it should be 'My favorite hobby is playing guitar.'"
+{"full_response": "That's a great hobby, how long have you been playing? One quick correction — it should be 'My favorite hobby is playing guitar.'", "advice": "One quick correction — it should be 'My favorite hobby is playing guitar.'"}
 ---
 Student: "What do you think about the current government and the election?"
-Mrs. Linton: "That's not something I can chat about here, let's keep things light! Tell me, what do you usually do on your weekends?"
+{"full_response": "That's not something I can chat about here, let's keep things light! Tell me, what do you usually do on your weekends?", "advice": ""}
 ---
 Student: "I am living in this city since five years and I like it very much."
-Mrs. Linton: "That's wonderful, what do you like most about it? Almost there — we'd say 'I have been living in this city for five years.'"
+{"full_response": "That's wonderful, what do you like most about it? Almost there — we'd say 'I have been living in this city for five years.'", "advice": "Almost there — we'd say 'I have been living in this city for five years.'"}
 ---
 
 Always remain in character as Mrs. Linton. Never mention that you are an AI, a language model, or that you are following instructions."""
@@ -89,10 +95,11 @@ class OpenRouterLLM:
         if self._http is None:
             self._http = httpx.AsyncClient(timeout=30.0)
 
-    async def generate(self, session_id: str, text: str) -> str | None:
+    async def generate(self, session_id: str, text: str) -> dict | None:
         """
-        Send ``text`` + session history to OpenRouter and return the
-        assistant's reply, or ``None`` on failure.
+        Send ``text`` + session history to OpenRouter and return a dict
+        with ``full_response`` (str) and ``advice`` (str), or ``None`` on
+        failure.
         """
         try:
             history = await self._get_history(session_id)
@@ -109,27 +116,33 @@ class OpenRouterLLM:
                 json={
                     "model": self.model,
                     "messages": messages,
-                    "max_tokens": 80,
+                    "max_tokens": 200,
                     "temperature": 0.7,
+                    "response_format": {"type": "json_object"},
                 },
             )
             response.raise_for_status()
             data = response.json()
-            return data["choices"][0]["message"]["content"]
+            content = data["choices"][0]["message"]["content"]
+            result = json.loads(content)
+            return {
+                "full_response": result.get("full_response", content),
+                "advice": result.get("advice", ""),
+            }
 
         except Exception as e:
             logger.exception(f"[{session_id}] OpenRouter LLM call failed: {e}")
             return None
 
     async def append_turn(
-        self, session_id: str, user_text: str, assistant_text: str
+        self, session_id: str, user_text: str, result: dict
     ) -> None:
         """Persist one user+assistant exchange in the session history."""
         async with self._lock:
             sess = self._sessions.get(session_id)
             if sess is not None:
                 sess.append({"role": "user", "content": user_text})
-                sess.append({"role": "assistant", "content": assistant_text})
+                sess.append({"role": "assistant", "content": result.get("full_response", "")})
 
     async def close_session(self, session_id: str) -> None:
         """Remove session history (called by the owning backend in close())."""
