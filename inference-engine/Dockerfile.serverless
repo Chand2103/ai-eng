@@ -54,7 +54,7 @@ COPY inference-engine/worker.py .
 #   ref-aud2.wav  → voice_id=2  (uncomment in tts.py VOICES when ready)
 # ------------------------------------------------------------------
 COPY inference-engine/ref-aud.wav .
-# COPY inference-engine/ref-aud2.wav .   # uncomment when voice 2 is added
+COPY inference-engine/ref-aud2.wav .
 
 # ------------------------------------------------------------------
 # Explicit HuggingFace cache so pre-downloaded weights are found at

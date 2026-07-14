@@ -5,9 +5,17 @@ import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
+import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response, JSONResponse
+from pydantic import BaseModel
+
+try:
+    from .translate import translate_to_sinhala
+except ImportError:
+    from translate import translate_to_sinhala
 
 from amazon_transcribe.client import TranscribeStreamingClient
 from amazon_transcribe.handlers import TranscriptResultStreamHandler
@@ -80,6 +88,90 @@ app.add_middleware(
 async def health():
     """Return 200 if orchestrator is ready."""
     return {"status": "healthy"}
+
+
+# ---------------------------------------------------------------------------
+# TTS request model and endpoint
+# ---------------------------------------------------------------------------
+class TTSRequest(BaseModel):
+    text: str
+    voice_id: int = 1
+    translate_to_si: bool = False
+
+
+VAST_ROUTE_URL = "https://run.vast.ai/route/"
+
+
+@app.post("/tts")
+async def tts_endpoint(req: TTSRequest):
+    """
+    Translate *text* to Sinhala (optional), then synthesise speech via
+    the Vast serverless OmniVoice TTS worker.
+
+    The frontend calls this when the user clicks "Get response in Sinhala".
+    Returns WAV audio bytes.
+    """
+    text = req.text
+    voice_id = req.voice_id
+
+    if req.translate_to_si:
+        translated = await translate_to_sinhala(text)
+        if translated is None:
+            return JSONResponse({"error": "Translation failed"}, status_code=502)
+        text = translated
+
+    # Route to Vast worker
+    vast_api_key = os.getenv("VAST_API_KEY", "")
+    endpoint_name = os.getenv("VAST_SERVERLESS_ENDPOINT_NAME", "")
+    if not vast_api_key or not endpoint_name:
+        return JSONResponse({"error": "VAST_API_KEY or VAST_SERVERLESS_ENDPOINT_NAME not set"}, status_code=500)
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            route_resp = await client.post(
+                VAST_ROUTE_URL,
+                headers={
+                    "Authorization": f"Bearer {vast_api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={"endpoint": endpoint_name, "cost": 100},
+            )
+            route_resp.raise_for_status()
+            route_data = route_resp.json()
+            if "url" not in route_data:
+                return JSONResponse(
+                    {"error": f"No worker available – status: {route_data.get('status', '?')}"},
+                    status_code=503,
+                )
+
+            worker_url = route_data["url"].rstrip("/")
+            auth_data = {
+                "signature": route_data["signature"],
+                "cost": route_data.get("cost", 100),
+                "endpoint": route_data.get("endpoint", endpoint_name),
+                "reqnum": route_data["reqnum"],
+                "url": route_data["url"],
+                "request_idx": 0,
+            }
+
+        # Call Vast TTS worker
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            tts_resp = await client.post(
+                f"{worker_url}/tts",
+                json={
+                    "auth_data": auth_data,
+                    "payload": {
+                        "text": text,
+                        "voice_id": voice_id,
+                    },
+                },
+            )
+            tts_resp.raise_for_status()
+            return Response(content=tts_resp.content, media_type="audio/wav")
+
+    except Exception as e:
+        logger.exception(f"TTS endpoint failed: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 # ---------------------------------------------------------------------------
