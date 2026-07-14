@@ -44,7 +44,7 @@ function ConversationContent() {
   const mode = searchParams.get("mode") || "free-talk";
   const topic = searchParams.get("topic") || null;
 
-  const { status, latency, startRecording, stopRecording, disconnect } = useVoiceChat();
+  const { status, latency, adviceText, startRecording, stopRecording, disconnect, translateAndPlaySinhala } = useVoiceChat();
   const [showEndModal, setShowEndModal] = useState(false);
   const [sessionStart] = useState(() => Date.now());
   const [elapsed, setElapsed] = useState(0);
@@ -100,10 +100,24 @@ function ConversationContent() {
           </p>
         )}
 
-        <div className="mt-4 h-32 w-full max-w-lg overflow-y-auto rounded-xl border border-[#E2E2DC] bg-white p-4">
-          <p className="text-center text-xs text-[#6B6B66]">
-            Conversation transcript will appear here
-          </p>
+        <div className="mt-4 w-full max-w-lg space-y-2">
+          <div className="h-32 overflow-y-auto rounded-xl border border-[#E2E2DC] bg-white p-4">
+            {adviceText ? (
+              <p className="text-xs leading-relaxed text-[#1A1A18]">{adviceText}</p>
+            ) : (
+              <p className="text-center text-xs text-[#6B6B66]">
+                Conversation transcript will appear here
+              </p>
+            )}
+          </div>
+          {adviceText && (
+            <button
+              onClick={translateAndPlaySinhala}
+              className="w-full cursor-pointer rounded-lg bg-[#1A1A18] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[#33332E]"
+            >
+              Get response in Sinhala
+            </button>
+          )}
         </div>
       </div>
 

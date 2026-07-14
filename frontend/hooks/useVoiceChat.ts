@@ -29,6 +29,7 @@ export function useVoiceChat(options?: UseVoiceChatOptions) {
   const [latency, setLatency] = useState<number | null>(null);
   const [transcription, setTranscription] = useState("");
   const [responseText, setResponseText] = useState("");
+  const [adviceText, setAdviceText] = useState("");
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -64,6 +65,8 @@ export function useVoiceChat(options?: UseVoiceChatOptions) {
           setStatus("TTS error");
         } else if (event.data === "[no speech detected]") {
           setStatus("no speech detected");
+        } else {
+          setAdviceText(event.data);
         }
       } else {
         const wavBlob = new Blob([event.data], { type: "audio/wav" });
@@ -192,15 +195,48 @@ export function useVoiceChat(options?: UseVoiceChatOptions) {
     setStatus("idle");
   }, [stopRecording]);
 
+  const translateAndPlaySinhala = useCallback(async () => {
+    if (!adviceText) return;
+    setStatus("processing");
+    const baseUrl = urlRef.current
+      .replace(/^ws:/, "http:")
+      .replace(/\/ws\/.*$/, "");
+    try {
+      const resp = await fetch(`${baseUrl}/tts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: adviceText,
+          voice_id: 2,
+          translate_to_si: true,
+        }),
+      });
+      if (!resp.ok) {
+        const err = await resp.text();
+        console.error("Sinhala TTS failed:", err);
+        return;
+      }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audio.play();
+      setStatus("playing response");
+    } catch (e) {
+      console.error("Sinhala TTS error:", e);
+    }
+  }, [adviceText]);
+
   return {
     status,
     latency,
     transcription,
     responseText,
+    adviceText,
     connect,
     startRecording,
     stopRecording,
     disconnect,
+    translateAndPlaySinhala,
   };
 }
 
