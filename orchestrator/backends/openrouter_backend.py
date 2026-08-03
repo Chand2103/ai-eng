@@ -5,7 +5,12 @@ from typing import AsyncIterator, AsyncGenerator, List, Union
 
 import httpx
 
-from .base import ConversationBackend
+from .base import (
+    ConversationBackend,
+    BEGIN_ROLEPLAY_TEXT,
+    ROLEPLAY_COMPLETE_MARKER,
+    feedback_to_spoken,
+)
 from .openrouter_llm import OpenRouterLLM
 
 logger = logging.getLogger(__name__)
@@ -41,10 +46,29 @@ class OpenRouterBackend(ConversationBackend):
     # ------------------------------------------------------------------
     # ConversationBackend interface
     # ------------------------------------------------------------------
-    async def connect(self, session_id: str) -> None:
+    async def connect(
+        self,
+        session_id: str,
+        system_prompt: str | None = None,
+        structured_output: bool = True,
+        roleplay: bool = False,
+    ) -> None:
         self._session_id = session_id
-        await self.llm.connect(session_id)
+        await self.llm.connect(session_id, system_prompt, structured_output, roleplay)
         logger.info(f"[{session_id}] OpenRouter session initialised.")
+
+    async def send_opening(self) -> AsyncIterator[Union[bytes, str]]:
+        """Speak the persona's opening line at the start of a roleplay."""
+        session_id = self._session_id
+        result = await self.llm.generate(session_id, BEGIN_ROLEPLAY_TEXT)
+        if result is None:
+            yield "[LLM error]"
+            return
+        full_response = result.get("full_response", "")
+        logger.info(f"[{session_id}] Roleplay opening: {full_response}")
+        await self.llm.append_turn(session_id, BEGIN_ROLEPLAY_TEXT, result)
+        async for audio_bytes in self._call_tts(session_id, full_response):
+            yield audio_bytes
 
     async def send_transcript(self, text: str) -> AsyncIterator[Union[bytes, str]]:
         session_id = self._session_id
@@ -72,6 +96,35 @@ class OpenRouterBackend(ConversationBackend):
 
         # 4. OpenRouter TTS
         async for audio_bytes in self._call_tts(session_id, full_response):
+            yield audio_bytes
+
+        # 5. End-of-roleplay signal
+        if result.get("is_complete"):
+            yield ROLEPLAY_COMPLETE_MARKER
+
+    async def get_feedback(self) -> AsyncIterator[Union[bytes, str]]:
+        """
+        Evaluate the finished roleplay and yield feedback for the frontend.
+
+        Yields the raw JSON report as text, then the spoken summary as
+        TTS audio bytes.  Runs even after a manual end, so this is the
+        single path for both end styles.
+        """
+        session_id = self._session_id
+        feedback_json, error = await self.llm.generate_feedback(session_id)
+        if error == "no transcript":
+            yield "[No speech was captured during this session, so there is no feedback to give.]"
+            return
+        if feedback_json is None:
+            yield f"[feedback error: {error}]"
+            return
+
+        logger.info(f"[{session_id}] Feedback JSON: {feedback_json}")
+        yield feedback_json
+
+        spoken = feedback_to_spoken(feedback_json)
+        logger.info(f"[{session_id}] Spoken feedback: {spoken}")
+        async for audio_bytes in self._call_tts(session_id, spoken):
             yield audio_bytes
 
     async def close(self) -> None:

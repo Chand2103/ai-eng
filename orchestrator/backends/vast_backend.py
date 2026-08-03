@@ -16,7 +16,13 @@ class VastBackend(ConversationBackend):
         self.url = os.getenv("VAST_SERVER_URL", "ws://localhost:10100/ws/orchestrator")
         self._ws = None
 
-    async def connect(self, session_id: str) -> None:
+    async def connect(
+        self,
+        session_id: str,
+        system_prompt: str | None = None,
+        structured_output: bool = True,
+        roleplay: bool = False,
+    ) -> None:
         logger.info(f"[{session_id}] Connecting to vast.ai at {self.url}")
         self._ws = await websockets.connect(self.url)
 

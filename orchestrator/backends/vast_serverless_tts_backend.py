@@ -4,7 +4,12 @@ from typing import AsyncIterator, Union
 
 import httpx
 
-from .base import ConversationBackend
+from .base import (
+    ConversationBackend,
+    BEGIN_ROLEPLAY_TEXT,
+    ROLEPLAY_COMPLETE_MARKER,
+    feedback_to_spoken,
+)
 from .openrouter_llm import OpenRouterLLM
 
 logger = logging.getLogger(__name__)
@@ -48,10 +53,16 @@ class VastServerlessTTSBackend(ConversationBackend):
     # ------------------------------------------------------------------
     # ConversationBackend interface
     # ------------------------------------------------------------------
-    async def connect(self, session_id: str) -> None:
+    async def connect(
+        self,
+        session_id: str,
+        system_prompt: str | None = None,
+        structured_output: bool = True,
+        roleplay: bool = False,
+    ) -> None:
         self._session_id = session_id
         self._request_counter = 0
-        await self.llm.connect(session_id)
+        await self.llm.connect(session_id, system_prompt, structured_output, roleplay)
         logger.info(f"[{session_id}] VastServerlessTTS session initialised.")
 
     async def warmup(self) -> None:
@@ -83,6 +94,19 @@ class VastServerlessTTSBackend(ConversationBackend):
         except Exception as e:
             logger.info(f"[{session_id}] Warm-up triggered cold start: {e}")
 
+    async def send_opening(self) -> AsyncIterator[Union[bytes, str]]:
+        """Speak the persona's opening line at the start of a roleplay."""
+        session_id = self._session_id
+        result = await self.llm.generate(session_id, BEGIN_ROLEPLAY_TEXT)
+        if result is None:
+            yield "[LLM error]"
+            return
+        full_response = result.get("full_response", "")
+        logger.info(f"[{session_id}] Roleplay opening: {full_response}")
+        await self.llm.append_turn(session_id, BEGIN_ROLEPLAY_TEXT, result)
+        async for item in self._tts(session_id, full_response):
+            yield item
+
     async def send_transcript(self, text: str) -> AsyncIterator[Union[bytes, str]]:
         session_id = self._session_id
         if not text:
@@ -108,6 +132,48 @@ class VastServerlessTTSBackend(ConversationBackend):
             yield advice
 
         # 4. Call Vast serverless TTS
+        async for item in self._tts(session_id, full_response):
+            yield item
+
+        # 5. End-of-roleplay signal
+        if result.get("is_complete"):
+            yield ROLEPLAY_COMPLETE_MARKER
+
+    async def get_feedback(self) -> AsyncIterator[Union[bytes, str]]:
+        """
+        Evaluate the finished roleplay and yield feedback for the frontend.
+
+        Yields the raw JSON report as text, then the spoken summary as
+        TTS audio bytes.  Runs even after a manual end, so this is the
+        single path for both end styles.
+        """
+        session_id = self._session_id
+        feedback_json, error = await self.llm.generate_feedback(session_id)
+        if error == "no transcript":
+            yield "[No speech was captured during this session, so there is no feedback to give.]"
+            return
+        if feedback_json is None:
+            yield f"[feedback error: {error}]"
+            return
+
+        logger.info(f"[{session_id}] Feedback JSON: {feedback_json}")
+        yield feedback_json
+
+        spoken = feedback_to_spoken(feedback_json)
+        logger.info(f"[{session_id}] Spoken feedback: {spoken}")
+        async for item in self._tts(session_id, spoken):
+            yield item
+
+    async def close(self) -> None:
+        session_id = self._session_id
+        await self.llm.close_session(session_id)
+        await self.llm.close_http()
+        logger.info(f"[{session_id}] VastServerlessTTS session cleaned up.")
+
+    # ------------------------------------------------------------------
+    # Internal — TTS via Vast serverless worker
+    # ------------------------------------------------------------------
+    async def _tts(self, session_id: str, text: str) -> AsyncIterator[Union[bytes, str]]:
         try:
             worker_url, auth_data = await self._route_to_worker()
         except Exception as e:
@@ -122,7 +188,7 @@ class VastServerlessTTSBackend(ConversationBackend):
                     json={
                         "auth_data": auth_data,
                         "payload": {
-                            "text": full_response,
+                            "text": text,
                             "ref_audio": "ref-aud.wav",
                             "ref_text": "Hi, This is alice, how are you doing today?",
                             "voice_id": self.voice_id,
@@ -139,12 +205,6 @@ class VastServerlessTTSBackend(ConversationBackend):
         except Exception as e:
             logger.exception(f"[{session_id}] Vast worker TTS call failed: {e}")
             yield f"[TTS error: {e}]"
-
-    async def close(self) -> None:
-        session_id = self._session_id
-        await self.llm.close_session(session_id)
-        await self.llm.close_http()
-        logger.info(f"[{session_id}] VastServerlessTTS session cleaned up.")
 
     # ------------------------------------------------------------------
     # Internal — Vast route resolution

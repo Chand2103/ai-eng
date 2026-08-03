@@ -1,5 +1,6 @@
 import os
 import asyncio
+import importlib.util
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -17,6 +18,39 @@ try:
 except ImportError:
     from translate import translate_to_sinhala
 
+
+def _load_roleplay_scenarios() -> dict:
+    """Load roleplay_scenarios.py no matter where the orchestrator is run from.
+
+    The file lives in the project root (one level above orchestrator/), so it
+    is not always importable via ``sys.path`` (e.g. when launched from the
+    orchestrator/ directory).  Fall back to loading it by absolute path.
+    """
+    # 1. Normal import (project root on sys.path).
+    try:
+        from roleplay_scenarios import ROLEPLAY_SCENARIOS
+        return ROLEPLAY_SCENARIOS
+    except ImportError:
+        pass
+    # 2. Relative import (orchestrator imported as a package).
+    try:
+        from .roleplay_scenarios import ROLEPLAY_SCENARIOS
+        return ROLEPLAY_SCENARIOS
+    except ImportError:
+        pass
+    # 3. Absolute path load from the project root.
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(project_root, "roleplay_scenarios.py")
+    if os.path.exists(path):
+        spec = importlib.util.spec_from_file_location("roleplay_scenarios", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.ROLEPLAY_SCENARIOS
+    return {}
+
+
+ROLEPLAY_SCENARIOS = _load_roleplay_scenarios()
+
 from amazon_transcribe.client import TranscribeStreamingClient
 from amazon_transcribe.handlers import TranscriptResultStreamHandler
 from amazon_transcribe.model import TranscriptEvent
@@ -25,6 +59,11 @@ try:
     from .backends import create_backend  # when imported as part of the package
 except ImportError:
     from backends import create_backend   # when run directly as a script
+
+try:
+    from .backends.base import ROLEPLAY_OUTPUT_FORMAT, END_ROLEPLAY_COMMAND, ROLEPLAY_COMPLETE_MARKER
+except ImportError:
+    from backends.base import ROLEPLAY_OUTPUT_FORMAT, END_ROLEPLAY_COMMAND, ROLEPLAY_COMPLETE_MARKER
 
 # Load environment variables from .env file
 load_dotenv()
@@ -67,6 +106,10 @@ class TranscriptionResultHandler(TranscriptResultStreamHandler):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Orchestrator starting up.")
+    if ROLEPLAY_SCENARIOS:
+        logger.info(f"Loaded {len(ROLEPLAY_SCENARIOS)} roleplay scenarios: {', '.join(ROLEPLAY_SCENARIOS)}")
+    else:
+        logger.warning("roleplay_scenarios.py not found — roleplay mode will fall back to the default prompt.")
     yield
     logger.info("Orchestrator shutting down.")
 
@@ -239,23 +282,75 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     await websocket.accept()
     logger.info(f"[{session_id}] Frontend connected to orchestrator.")
 
+    params = websocket.query_params
+    system_prompt = None
+    structured_output = True
+    roleplay_mode = False
+    if params.get("mode") == "roleplay":
+        topic_id = params.get("topic")
+        scenario = ROLEPLAY_SCENARIOS.get(topic_id) if topic_id else None
+        if scenario:
+            system_prompt = scenario["system_prompt"] + ROLEPLAY_OUTPUT_FORMAT
+            roleplay_mode = True
+            logger.info(f"[{session_id}] Roleplay scenario '{topic_id}' selected: {scenario['title']}")
+        else:
+            logger.warning(f"[{session_id}] Unknown roleplay topic: {topic_id}")
+
     backend = create_backend(session_id)
 
     try:
-        await backend.connect(session_id)
-        asyncio.create_task(backend.warmup())
+        await backend.connect(
+            session_id,
+            system_prompt=system_prompt,
+            structured_output=structured_output,
+            roleplay=roleplay_mode,
+        )
+
+        if roleplay_mode:
+            # Roleplay: have the persona open the scene before the student
+            # speaks. This also triggers a Vast cold start, so skip warmup().
+            logger.info(f"[{session_id}] Speaking roleplay opening...")
+            async for result in backend.send_opening():
+                if isinstance(result, bytes):
+                    await websocket.send_bytes(result)
+                elif isinstance(result, str):
+                    await websocket.send_text(result)
+        else:
+            asyncio.create_task(backend.warmup())
 
         # Main loop: handle multiple recording sessions
+        roleplay_ended = False
         while True:
             logger.info(f"[{session_id}] Waiting for first PCM chunk from frontend...")
             first_chunk_received = False
             pcm_queue: asyncio.Queue = asyncio.Queue()
             transcription_task = None
 
-            # Receive PCM chunks from frontend
+            # Receive PCM chunks / text commands from frontend
             while True:
                 try:
-                    pcm_chunk = await websocket.receive_bytes()
+                    message = await websocket.receive()
+
+                    # Frontend closed the socket
+                    if message.get("type") == "websocket.disconnect":
+                        logger.info(f"[{session_id}] Frontend disconnected.")
+                        if first_chunk_received and transcription_task:
+                            # Signal end of audio
+                            await pcm_queue.put(None)
+                        return
+
+                    # Text commands (roleplay mode)
+                    text = message.get("text")
+                    if text is not None:
+                        logger.info(f"[{session_id}] Received text command: {text}")
+                        if roleplay_mode and text == END_ROLEPLAY_COMMAND:
+                            roleplay_ended = True
+                            break  # exit inner loop to run the feedback flow
+                        continue
+
+                    pcm_chunk = message.get("bytes")
+                    if pcm_chunk is None:
+                        continue
 
                     # Empty chunk or very small chunk = end of audio
                     if not pcm_chunk or len(pcm_chunk) < 16:
@@ -296,6 +391,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                                     elif isinstance(result, str):
                                         logger.info(f"[{session_id}] Forwarding message from backend: {result}")
                                         await websocket.send_text(result)
+                                        if roleplay_mode and result == ROLEPLAY_COMPLETE_MARKER:
+                                            roleplay_ended = True
                         else:
                             logger.warning(f"[{session_id}] End-of-audio without any audio chunks received.")
 
@@ -318,6 +415,23 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         # Signal end of audio
                         await pcm_queue.put(None)
                     return
+
+            # A roleplay ended — either the student pressed the end button
+            # ([end_roleplay] command) or the persona wrapped up the scene
+            # itself ([roleplay_complete] marker). Evaluate the session,
+            # forward the feedback (JSON text + spoken TTS audio), then close.
+            if roleplay_ended:
+                logger.info(f"[{session_id}] Roleplay ended — generating feedback.")
+                async for result in backend.get_feedback():
+                    if isinstance(result, bytes):
+                        logger.info(f"[{session_id}] Forwarding {len(result)} bytes of feedback audio to frontend.")
+                        await websocket.send_bytes(result)
+                    elif isinstance(result, str):
+                        logger.info(f"[{session_id}] Forwarding feedback message: {result}")
+                        await websocket.send_text(result)
+                logger.info(f"[{session_id}] Feedback complete, closing socket.")
+                await websocket.close()
+                return
 
     except WebSocketDisconnect:
         logger.info(f"[{session_id}] Frontend disconnected.")

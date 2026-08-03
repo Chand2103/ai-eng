@@ -6,6 +6,8 @@ from typing import Dict, List
 
 import httpx
 
+from .base import FEEDBACK_SYSTEM_PROMPT
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -77,21 +79,48 @@ class OpenRouterLLM:
         model: str | None = None,
     ):
         self.api_key = api_key
-        self.model = model or os.getenv(
-            "OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct"
+        self.model = (
+            model
+            or os.getenv("OPENROUTER_LLM_MODEL")
+            or os.getenv("OPENROUTER_MODEL")
+            or "google/gemini-3-flash-preview"
         )
 
         self._sessions: Dict[str, List[dict]] = {}
+        self._system_prompts: Dict[str, str] = {}
+        self._structured_output: Dict[str, bool] = {}
+        self._roleplay: Dict[str, bool] = {}
         self._lock = asyncio.Lock()
         self._http: httpx.AsyncClient | None = None
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-    async def connect(self, session_id: str) -> None:
-        """Initialise per-session history and the shared HTTP client."""
+    async def connect(
+        self,
+        session_id: str,
+        system_prompt: str | None = None,
+        structured_output: bool = True,
+        roleplay: bool = False,
+    ) -> None:
+        """Initialise per-session history and the shared HTTP client.
+
+        ``system_prompt`` overrides the default Free Talk prompt for this
+        session (e.g. a roleplay scenario prompt). Defaults to SYSTEM_PROMPT.
+
+        ``structured_output`` enables ``response_format: json_object`` and
+        parses ``{"full_response", "advice"}``.
+
+        ``roleplay`` switches the JSON parsing to the roleplay schema
+        ``{"dialogue", "is_complete"}``.  ``dialogue`` becomes
+        ``full_response`` (the spoken text) and ``is_complete`` is surfaced
+        so the backend can end the session when the scenario concludes.
+        """
         async with self._lock:
             self._sessions[session_id] = []
+            self._system_prompts[session_id] = system_prompt or SYSTEM_PROMPT
+            self._structured_output[session_id] = structured_output
+            self._roleplay[session_id] = roleplay
         if self._http is None:
             self._http = httpx.AsyncClient(timeout=30.0)
 
@@ -100,12 +129,36 @@ class OpenRouterLLM:
         Send ``text`` + session history to OpenRouter and return a dict
         with ``full_response`` (str) and ``advice`` (str), or ``None`` on
         failure.
+
+        Retries once if the model returns an empty JSON object — a known
+        failure mode of small models in ``response_format: json_object``
+        mode (e.g. llama-3.1-8b-instruct replying with ``{}``).
         """
+        for attempt in range(2):
+            result = await self._generate_once(session_id, text)
+            if result is not None:
+                return result
+            logger.warning(f"[{session_id}] LLM returned empty output, retrying ({attempt + 1}/2)...")
+        logger.error(f"[{session_id}] LLM returned empty output on both attempts.")
+        return None
+
+    async def _generate_once(self, session_id: str, text: str) -> dict | None:
         try:
             history = await self._get_history(session_id)
-            messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            messages = [{"role": "system", "content": self._get_system_prompt(session_id)}]
             messages.extend(history)
             messages.append({"role": "user", "content": text})
+
+            structured = self._is_structured_output(session_id)
+            roleplay = self._is_roleplay(session_id)
+            payload = {
+                "model": self.model,
+                "messages": messages,
+                "max_tokens": 200,
+                "temperature": 0.7,
+            }
+            if structured:
+                payload["response_format"] = {"type": "json_object"}
 
             response = await self._http.post(
                 "https://openrouter.ai/api/v1/chat/completions",
@@ -113,26 +166,139 @@ class OpenRouterLLM:
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": self.model,
-                    "messages": messages,
-                    "max_tokens": 200,
-                    "temperature": 0.7,
-                    "response_format": {"type": "json_object"},
-                },
+                json=payload,
             )
             response.raise_for_status()
             data = response.json()
             content = data["choices"][0]["message"]["content"]
-            result = json.loads(content)
+
+            if not content or not content.strip():
+                return None
+
+            if not structured:
+                # Legacy plain-text mode (no longer used by roleplays).
+                return {"full_response": content.strip(), "advice": "", "is_complete": False}
+
+            try:
+                result = json.loads(content)
+            except (json.JSONDecodeError, TypeError):
+                # Model returned plain text instead of JSON — use it as-is.
+                return {"full_response": content.strip(), "advice": "", "is_complete": False}
+
+            if not isinstance(result, dict):
+                return {"full_response": content.strip(), "advice": "", "is_complete": False}
+
+            if roleplay:
+                full_response = (
+                    result.get("dialogue") or result.get("full_response") or result.get("content") or ""
+                )
+                advice = ""
+                is_complete = _to_bool(result.get("is_complete", False))
+            else:
+                full_response = result.get("full_response") or result.get("content") or ""
+                advice = result.get("advice") or ""
+                is_complete = False
+
+            if not isinstance(full_response, str):
+                full_response = ""
+            if not isinstance(advice, str):
+                advice = ""
+            full_response = full_response.strip()
+            advice = advice.strip()
+
+            if not full_response:
+                # Valid JSON but empty (e.g. `{}` or nested empty object).
+                return None
+
             return {
-                "full_response": result.get("full_response", content),
-                "advice": result.get("advice", ""),
+                "full_response": full_response,
+                "advice": advice,
+                "is_complete": is_complete,
             }
 
         except Exception as e:
             logger.exception(f"[{session_id}] OpenRouter LLM call failed: {e}")
             return None
+
+    async def generate_feedback(self, session_id: str) -> tuple[str | None, str | None]:
+        """
+        One-shot end-of-roleplay evaluation of the student's turns.
+
+        Runs a fresh chat completion with ``FEEDBACK_SYSTEM_PROMPT`` and only
+        the student's messages from this session (no persona turns, no
+        character system prompt).
+
+        Returns ``(feedback_json, None)`` on success, or ``(None, reason)``
+        where ``reason`` is ``"no transcript"`` if there were no student
+        turns, or ``"LLM error: ..."`` if the call failed.
+        """
+        history = await self._get_history(session_id)
+        user_turns = [
+            turn.get("content", "")
+            for turn in history
+            if turn.get("role") == "user" and turn.get("content")
+        ]
+        if not user_turns:
+            return None, "no transcript"
+
+        transcript = "\n".join(f"Student: {turn}" for turn in user_turns)
+        if self._http is None:
+            return None, "LLM error: connection not initialised"
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": FEEDBACK_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        "Evaluate the student's turns below and return your "
+                        f"JSON feedback report.\n\n{transcript}"
+                    ),
+                },
+            ],
+            "max_tokens": 1000,
+            "temperature": 0.4,
+            "response_format": {"type": "json_object"},
+        }
+
+        try:
+            response = await self._http.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+            content = data["choices"][0]["message"]["content"]
+            if not content or not content.strip():
+                return None, "LLM error: empty response"
+            content = content.strip()
+
+            # Validate it is JSON, salvaging a JSON object embedded in the
+            # text (e.g. markdown fences) rather than discarding the reply.
+            try:
+                json.loads(content)
+            except (json.JSONDecodeError, TypeError):
+                start = content.find("{")
+                end = content.rfind("}")
+                if start == -1 or end <= start:
+                    return None, "LLM error: invalid JSON"
+                candidate = content[start : end + 1]
+                try:
+                    json.loads(candidate)
+                except json.JSONDecodeError:
+                    return None, "LLM error: invalid JSON"
+                content = candidate
+
+            return content, None
+
+        except Exception as e:
+            logger.exception(f"[{session_id}] OpenRouter feedback call failed: {e}")
+            return None, f"LLM error: {e}"
 
     async def append_turn(
         self, session_id: str, user_text: str, result: dict
@@ -148,6 +314,9 @@ class OpenRouterLLM:
         """Remove session history (called by the owning backend in close())."""
         async with self._lock:
             self._sessions.pop(session_id, None)
+            self._system_prompts.pop(session_id, None)
+            self._structured_output.pop(session_id, None)
+            self._roleplay.pop(session_id, None)
 
     async def close_http(self) -> None:
         """Shut down the shared HTTP client."""
@@ -161,3 +330,23 @@ class OpenRouterLLM:
     async def _get_history(self, session_id: str) -> List[dict]:
         async with self._lock:
             return list(self._sessions.get(session_id, []))
+
+    def _get_system_prompt(self, session_id: str) -> str:
+        return self._system_prompts.get(session_id, SYSTEM_PROMPT)
+
+    def _is_structured_output(self, session_id: str) -> bool:
+        return self._structured_output.get(session_id, True)
+
+    def _is_roleplay(self, session_id: str) -> bool:
+        return self._roleplay.get(session_id, False)
+
+
+def _to_bool(value) -> bool:
+    """Coerce a JSON value (bool/str/number) into a boolean."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes", "y", "complete", "done")
+    return False

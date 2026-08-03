@@ -3,13 +3,15 @@
 import { useRouter } from "next/navigation";
 import {
   Briefcase,
-  Plane,
   Utensils,
   Stethoscope,
   Building,
   Users,
   Phone,
   ShoppingBag,
+  Home,
+  Landmark,
+  Map,
   type LucideIcon,
 } from "lucide-react";
 import Card from "@/components/ui/Card";
@@ -21,13 +23,15 @@ import { useAuth } from "@/context/AuthContext";
 
 const ICON_MAP: Record<string, LucideIcon> = {
   briefcase: Briefcase,
-  plane: Plane,
   utensils: Utensils,
   stethoscope: Stethoscope,
   building: Building,
   users: Users,
   phone: Phone,
   "shopping-bag": ShoppingBag,
+  home: Home,
+  landmark: Landmark,
+  map: Map,
 };
 
 export default function RoleplayPage() {
