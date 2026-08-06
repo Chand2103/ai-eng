@@ -138,12 +138,13 @@ class ConversationBackend(ABC):
         Default is a no-op.  Override in backends that need it.
         """
 
-    async def send_opening(self) -> AsyncIterator[Union[bytes, str]]:
+    async def send_opening(self, text: str | None = None) -> AsyncIterator[Union[bytes, str]]:
         """
-        Yield the LLM's opening line (TTS audio) at session start.
+        Yield the opening line (TTS audio) at session start.
 
-        Used by roleplay sessions so the persona speaks first.  The default
-        yields nothing — non-roleplay backends don't need an opening turn.
+        When *text* is provided (IELTS mode), synthesise it directly
+        without an LLM call.  Otherwise generate it via the LLM
+        (roleplay mode).  The default yields nothing.
         """
         ...
         yield  # pragma: no cover (mark generator)
@@ -159,13 +160,24 @@ class ConversationBackend(ABC):
         ...
         yield  # pragma: no cover (mark generator)
 
-    async def get_feedback(self) -> AsyncIterator[Union[bytes, str]]:
+    async def get_feedback(
+        self,
+        evaluator_prompt: str | None = None,
+        spoken_fn=None,
+        include_all_turns: bool = False,
+    ) -> AsyncIterator[Union[bytes, str]]:
         """
-        Generate end-of-roleplay feedback for the session.
+        Generate end-of-session feedback for the session.
+
+        *evaluator_prompt* overrides the default ``FEEDBACK_SYSTEM_PROMPT``
+        (e.g. the IELTS evaluator prompt).  *spoken_fn* converts the JSON
+        feedback into a short spoken summary for TTS.  When
+        *include_all_turns* is ``True`` the full transcript (both sides)
+        is sent to the evaluator instead of just the student's turns.
 
         Yields the raw JSON feedback text first, then the spoken summary
-        as TTS ``bytes``.  The default is a no-op that just reports the
-        feature is unavailable — backends that support roleplay override it.
+        as TTS ``bytes``.  The default yields a notice that the feature
+        is unavailable.
         """
         yield "[feedback unavailable]"
         return

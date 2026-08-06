@@ -220,35 +220,57 @@ class OpenRouterLLM:
             logger.exception(f"[{session_id}] OpenRouter LLM call failed: {e}")
             return None
 
-    async def generate_feedback(self, session_id: str) -> tuple[str | None, str | None]:
+    async def generate_feedback(
+        self,
+        session_id: str,
+        system_prompt: str | None = None,
+        include_all_turns: bool = False,
+    ) -> tuple[str | None, str | None]:
         """
-        One-shot end-of-roleplay evaluation of the student's turns.
+        One-shot end-of-session evaluation.
 
-        Runs a fresh chat completion with ``FEEDBACK_SYSTEM_PROMPT`` and only
-        the student's messages from this session (no persona turns, no
-        character system prompt).
+        When *include_all_turns* is ``False`` (the default, used for
+        roleplay), only the student's messages are included.  When
+        ``True`` (IELTS), both student and interviewer/assistant turns
+        are sent to the evaluator.
 
         Returns ``(feedback_json, None)`` on success, or ``(None, reason)``
-        where ``reason`` is ``"no transcript"`` if there were no student
-        turns, or ``"LLM error: ..."`` if the call failed.
+        where ``reason`` is ``"no transcript"`` if there were no turns to
+        evaluate, or ``"LLM error: ..."`` if the call failed.
         """
+        prompt = system_prompt or FEEDBACK_SYSTEM_PROMPT
         history = await self._get_history(session_id)
-        user_turns = [
-            turn.get("content", "")
-            for turn in history
-            if turn.get("role") == "user" and turn.get("content")
-        ]
-        if not user_turns:
-            return None, "no transcript"
 
-        transcript = "\n".join(f"Student: {turn}" for turn in user_turns)
+        if include_all_turns:
+            transcript_lines: list[str] = []
+            for turn in history:
+                role = turn.get("role", "")
+                content = turn.get("content", "")
+                if not content:
+                    continue
+                if role == "user":
+                    transcript_lines.append(f"Student: {content}")
+                elif role == "assistant":
+                    transcript_lines.append(f"Interviewer: {content}")
+            if not transcript_lines:
+                return None, "no transcript"
+            transcript = "\n".join(transcript_lines)
+        else:
+            user_turns = [
+                turn.get("content", "")
+                for turn in history
+                if turn.get("role") == "user" and turn.get("content")
+            ]
+            if not user_turns:
+                return None, "no transcript"
+            transcript = "\n".join(f"Student: {turn}" for turn in user_turns)
         if self._http is None:
             return None, "LLM error: connection not initialised"
 
         payload = {
             "model": self.model,
             "messages": [
-                {"role": "system", "content": FEEDBACK_SYSTEM_PROMPT},
+                {"role": "system", "content": prompt},
                 {
                     "role": "user",
                     "content": (
@@ -309,6 +331,13 @@ class OpenRouterLLM:
             if sess is not None:
                 sess.append({"role": "user", "content": user_text})
                 sess.append({"role": "assistant", "content": result.get("full_response", "")})
+
+    async def append_assistant_turn(self, session_id: str, text: str) -> None:
+        """Append just an assistant turn (for fixed opening lines)."""
+        async with self._lock:
+            sess = self._sessions.get(session_id)
+            if sess is not None:
+                sess.append({"role": "assistant", "content": text})
 
     async def close_session(self, session_id: str) -> None:
         """Remove session history (called by the owning backend in close())."""

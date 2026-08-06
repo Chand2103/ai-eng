@@ -1,6 +1,7 @@
 import os
+import sys
 import asyncio
-import importlib.util
+import importlib
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -19,37 +20,44 @@ except ImportError:
     from translate import translate_to_sinhala
 
 
-def _load_roleplay_scenarios() -> dict:
-    """Load roleplay_scenarios.py no matter where the orchestrator is run from.
+def _load_prompts():
+    """Load the ``prompts`` package no matter where the orchestrator runs.
 
-    The file lives in the project root (one level above orchestrator/), so it
-    is not always importable via ``sys.path`` (e.g. when launched from the
-    orchestrator/ directory).  Fall back to loading it by absolute path.
+    The package lives one level above ``orchestrator/``, so it is not
+    always importable via ``sys.path`` (e.g. when launched from the
+    orchestrator/ directory).  Fall back to adding the project root to
+    ``sys.path`` and importing normally, so the package's relative
+    submodule imports resolve.  Returns ``None`` if it cannot be loaded.
     """
-    # 1. Normal import (project root on sys.path).
     try:
-        from roleplay_scenarios import ROLEPLAY_SCENARIOS
-        return ROLEPLAY_SCENARIOS
+        return importlib.import_module("prompts")
     except ImportError:
         pass
-    # 2. Relative import (orchestrator imported as a package).
-    try:
-        from .roleplay_scenarios import ROLEPLAY_SCENARIOS
-        return ROLEPLAY_SCENARIOS
-    except ImportError:
-        pass
-    # 3. Absolute path load from the project root.
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    path = os.path.join(project_root, "roleplay_scenarios.py")
-    if os.path.exists(path):
-        spec = importlib.util.spec_from_file_location("roleplay_scenarios", path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module.ROLEPLAY_SCENARIOS
-    return {}
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    try:
+        return importlib.import_module("prompts")
+    except ImportError:
+        return None
 
 
-ROLEPLAY_SCENARIOS = _load_roleplay_scenarios()
+_prompts = _load_prompts()
+
+if _prompts is not None:
+    INTERVIEWER_TEMPLATE = _prompts.INTERVIEWER_TEMPLATE
+    OPENING_LINE = _prompts.OPENING_LINE
+    EVALUATOR_SYSTEM_PROMPT = _prompts.EVALUATOR_SYSTEM_PROMPT
+    evaluator_to_spoken = _prompts.evaluator_to_spoken
+    TOPIC_CATEGORIES = _prompts.TOPIC_CATEGORIES
+    ROLEPLAY_SCENARIOS = _prompts.ROLEPLAY_SCENARIOS
+else:
+    INTERVIEWER_TEMPLATE = ""
+    OPENING_LINE = ""
+    EVALUATOR_SYSTEM_PROMPT = ""
+    evaluator_to_spoken = None
+    TOPIC_CATEGORIES = []
+    ROLEPLAY_SCENARIOS = {}
 
 from amazon_transcribe.client import TranscribeStreamingClient
 from amazon_transcribe.handlers import TranscriptResultStreamHandler
@@ -106,10 +114,10 @@ class TranscriptionResultHandler(TranscriptResultStreamHandler):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Orchestrator starting up.")
-    if ROLEPLAY_SCENARIOS:
-        logger.info(f"Loaded {len(ROLEPLAY_SCENARIOS)} roleplay scenarios: {', '.join(ROLEPLAY_SCENARIOS)}")
+    if _prompts is not None:
+        logger.info(f"Loaded {len(ROLEPLAY_SCENARIOS)} roleplay scenarios and {len(TOPIC_CATEGORIES)} IELTS topic categories.")
     else:
-        logger.warning("roleplay_scenarios.py not found — roleplay mode will fall back to the default prompt.")
+        logger.warning("prompts package not found — roleplay and IELTS modes will fall back to defaults.")
     yield
     logger.info("Orchestrator shutting down.")
 
@@ -286,6 +294,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     system_prompt = None
     structured_output = True
     roleplay_mode = False
+    ielts_mode = False
+    ielts_topic = None
     if params.get("mode") == "roleplay":
         topic_id = params.get("topic")
         scenario = ROLEPLAY_SCENARIOS.get(topic_id) if topic_id else None
@@ -295,6 +305,13 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             logger.info(f"[{session_id}] Roleplay scenario '{topic_id}' selected: {scenario['title']}")
         else:
             logger.warning(f"[{session_id}] Unknown roleplay topic: {topic_id}")
+    elif params.get("mode") == "ielts":
+        import random
+        ielts_topic = random.choice(TOPIC_CATEGORIES)
+        system_prompt = INTERVIEWER_TEMPLATE.replace("{topic_category}", ielts_topic) + ROLEPLAY_OUTPUT_FORMAT
+        roleplay_mode = True   # reuse {"dialogue","is_complete"} JSON schema
+        ielts_mode = True
+        logger.info(f"[{session_id}] IELTS mode selected, topic: {ielts_topic}")
 
     backend = create_backend(session_id)
 
@@ -307,10 +324,13 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
         )
 
         if roleplay_mode:
-            # Roleplay: have the persona open the scene before the student
-            # speaks. This also triggers a Vast cold start, so skip warmup().
-            logger.info(f"[{session_id}] Speaking roleplay opening...")
-            async for result in backend.send_opening():
+            # Roleplay / IELTS: have the persona open the scene before the
+            # student speaks. This also triggers a Vast cold start, so skip
+            # warmup().  For IELTS the opening is a fixed string; for
+            # roleplay it is generated by the LLM.
+            opening_text = OPENING_LINE if ielts_mode else None
+            logger.info(f"[{session_id}] Speaking {'IELTS' if ielts_mode else 'roleplay'} opening...")
+            async for result in backend.send_opening(text=opening_text):
                 if isinstance(result, bytes):
                     await websocket.send_bytes(result)
                 elif isinstance(result, str):
@@ -422,7 +442,18 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             # forward the feedback (JSON text + spoken TTS audio), then close.
             if roleplay_ended:
                 logger.info(f"[{session_id}] Roleplay ended — generating feedback.")
-                async for result in backend.get_feedback():
+                # IELTS uses the full-transcript evaluator; roleplay
+                # evaluates only the student's turns.
+                evaluator_kw = (
+                    dict(
+                        evaluator_prompt=EVALUATOR_SYSTEM_PROMPT,
+                        spoken_fn=evaluator_to_spoken,
+                        include_all_turns=True,
+                    )
+                    if ielts_mode
+                    else {}
+                )
+                async for result in backend.get_feedback(**evaluator_kw):
                     if isinstance(result, bytes):
                         logger.info(f"[{session_id}] Forwarding {len(result)} bytes of feedback audio to frontend.")
                         await websocket.send_bytes(result)

@@ -37,8 +37,10 @@ export function useVoiceChat(options?: UseVoiceChatOptions) {
   const [adviceText, setAdviceText] = useState("");
 
   const isRoleplay = options?.mode === "roleplay";
-  const [micDisabled, setMicDisabled] = useState(isRoleplay);
-  const awaitingOpeningRef = useRef(isRoleplay);
+  const isIelts = options?.mode === "ielts";
+  const isAutoStart = isRoleplay || isIelts;
+  const [micDisabled, setMicDisabled] = useState(isAutoStart);
+  const awaitingOpeningRef = useRef(isAutoStart);
   const [roleplayEnded, setRoleplayEnded] = useState(false);
   const roleplayEndedRef = useRef(false);
   const [feedbackText, setFeedbackText] = useState("");
@@ -93,7 +95,7 @@ export function useVoiceChat(options?: UseVoiceChatOptions) {
     if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) return;
 
     setStatus("connecting");
-    if (isRoleplay) {
+    if (isAutoStart) {
       awaitingOpeningRef.current = true;
       setMicDisabled(true);
     }
@@ -177,15 +179,15 @@ export function useVoiceChat(options?: UseVoiceChatOptions) {
     };
 
     wsRef.current = ws;
-  }, [isRoleplay, completeRoleplay]);
+  }, [isAutoStart, completeRoleplay]);
 
-  // Roleplays are auto-started: connect on mount so the opening line
+  // Roleplay/IELTS are auto-started: connect on mount so the opening line
   // can be generated and played before the mic becomes usable.
   useEffect(() => {
-    if (isRoleplay) {
+    if (isAutoStart) {
       setTimeout(connect, 0);
     }
-  }, [connect, isRoleplay]);
+  }, [connect, isAutoStart]);
 
   const startRecording = useCallback(async () => {
     // Re-entry guard: a second press while already recording must not stack

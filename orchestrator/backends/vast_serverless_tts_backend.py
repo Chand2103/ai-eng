@@ -94,16 +94,27 @@ class VastServerlessTTSBackend(ConversationBackend):
         except Exception as e:
             logger.info(f"[{session_id}] Warm-up triggered cold start: {e}")
 
-    async def send_opening(self) -> AsyncIterator[Union[bytes, str]]:
-        """Speak the persona's opening line at the start of a roleplay."""
+    async def send_opening(self, text: str | None = None) -> AsyncIterator[Union[bytes, str]]:
+        """Speak the opening line at the start of a roleplay / IELTS test.
+
+        When *text* is provided (IELTS), synthesise it directly without an
+        LLM call.  Otherwise generate it via the LLM (roleplay).
+        """
         session_id = self._session_id
-        result = await self.llm.generate(session_id, BEGIN_ROLEPLAY_TEXT)
-        if result is None:
-            yield "[LLM error]"
-            return
-        full_response = result.get("full_response", "")
-        logger.info(f"[{session_id}] Roleplay opening: {full_response}")
-        await self.llm.append_turn(session_id, BEGIN_ROLEPLAY_TEXT, result)
+        if text is None:
+            # Roleplay: LLM generates the opening in character.
+            result = await self.llm.generate(session_id, BEGIN_ROLEPLAY_TEXT)
+            if result is None:
+                yield "[LLM error]"
+                return
+            full_response = result.get("full_response", "")
+            logger.info(f"[{session_id}] Roleplay opening: {full_response}")
+            await self.llm.append_turn(session_id, BEGIN_ROLEPLAY_TEXT, result)
+        else:
+            # IELTS (or similar): fixed opening line, no LLM call needed.
+            full_response = text
+            logger.info(f"[{session_id}] Fixed opening: {full_response}")
+            await self.llm.append_assistant_turn(session_id, full_response)
         async for item in self._tts(session_id, full_response):
             yield item
 
@@ -139,16 +150,28 @@ class VastServerlessTTSBackend(ConversationBackend):
         if result.get("is_complete"):
             yield ROLEPLAY_COMPLETE_MARKER
 
-    async def get_feedback(self) -> AsyncIterator[Union[bytes, str]]:
+    async def get_feedback(
+        self,
+        evaluator_prompt: str | None = None,
+        spoken_fn=None,
+        include_all_turns: bool = False,
+    ) -> AsyncIterator[Union[bytes, str]]:
         """
-        Evaluate the finished roleplay and yield feedback for the frontend.
+        Evaluate the finished session and yield feedback for the frontend.
 
         Yields the raw JSON report as text, then the spoken summary as
-        TTS audio bytes.  Runs even after a manual end, so this is the
-        single path for both end styles.
+        TTS audio bytes.  The *evaluator_prompt* and *include_all_turns*
+        allow the orchestrator to switch between roleplay and IELTS
+        evaluators without the backend knowing the mode.
         """
+        if spoken_fn is None:
+            spoken_fn = feedback_to_spoken
         session_id = self._session_id
-        feedback_json, error = await self.llm.generate_feedback(session_id)
+        feedback_json, error = await self.llm.generate_feedback(
+            session_id,
+            system_prompt=evaluator_prompt,
+            include_all_turns=include_all_turns,
+        )
         if error == "no transcript":
             yield "[No speech was captured during this session, so there is no feedback to give.]"
             return
@@ -159,7 +182,7 @@ class VastServerlessTTSBackend(ConversationBackend):
         logger.info(f"[{session_id}] Feedback JSON: {feedback_json}")
         yield feedback_json
 
-        spoken = feedback_to_spoken(feedback_json)
+        spoken = spoken_fn(feedback_json)
         logger.info(f"[{session_id}] Spoken feedback: {spoken}")
         async for item in self._tts(session_id, spoken):
             yield item

@@ -69,12 +69,13 @@ function ConversationContent() {
       : mode === "roleplay"
       ? `Roleplay: ${topic || "Unknown"}`
       : mode === "ielts"
-      ? "IELTS Prep"
+      ? "IELTS Speaking Test"
       : "Conversation";
 
   const isAiSpeaking = status === "playing response";
   const isRecording = status === "recording";
   const isRoleplay = mode === "roleplay";
+  const isIelts = mode === "ielts";
 
   const handleEnd = () => {
     disconnect();
@@ -108,47 +109,91 @@ function ConversationContent() {
         )}
 
         <div className="mt-4 w-full max-w-lg space-y-2">
-          <div className="h-32 overflow-y-auto rounded-xl border border-[#E2E2DC] bg-white p-4">
+          <div className="h-40 overflow-y-auto rounded-xl border border-[#E2E2DC] bg-white p-4">
             {roleplayEnded && feedbackReady ? (
-              <div className="space-y-2 text-xs leading-relaxed text-[#1A1A18]">
-                <div className="flex items-center justify-between border-b border-[#F0F0EA] pb-1">
-                  <p className="font-semibold">Overall score</p>
-                  <span className="font-semibold">
-                    {feedbackReady.overall_score ?? "-"}
-                    {typeof feedbackReady.overall_score === "number" ? "/10" : ""}
-                  </span>
+              isIelts && feedbackReady.overall_band !== undefined ? (
+                /* IELTS feedback */
+                <div className="space-y-2 text-xs leading-relaxed text-[#1A1A18]">
+                  <div className="flex items-center justify-between border-b border-[#F0F0EA] pb-1">
+                    <p className="font-semibold">Overall band score</p>
+                    <span className="font-semibold">{feedbackReady.overall_band}</span>
+                  </div>
+                  {(
+                    [
+                      ["fluency_coherence", "Fluency & Coherence"],
+                      ["lexical_resource", "Lexical Resource"],
+                      ["grammatical_range_accuracy", "Grammar Range & Accuracy"],
+                      ["pronunciation", "Pronunciation"],
+                    ] as const
+                  ).map(([key, label]) => {
+                    const c = feedbackReady[key];
+                    if (!c || typeof c !== "object") return null;
+                    return (
+                      <div key={key}>
+                        <div className="flex items-center justify-between">
+                          <p className="font-semibold">{label}</p>
+                          <span>{c.score}</span>
+                        </div>
+                        <p className="text-[#6B6B66]">{c.reasoning}</p>
+                      </div>
+                    );
+                  })}
+                  {feedbackReady.summary_feedback && (
+                    <p className="border-t border-[#F0F0EA] pt-1">{feedbackReady.summary_feedback}</p>
+                  )}
+                  {feedbackReady.top_improvement_areas && feedbackReady.top_improvement_areas.length > 0 && (
+                    <div>
+                      <p className="font-semibold">Areas to improve</p>
+                      <ul className="list-inside list-disc space-y-0.5">
+                        {feedbackReady.top_improvement_areas.map((a, i) => (
+                          <li key={i}>{a}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                 </div>
-                {feedbackReady.overall_comment && <p>{feedbackReady.overall_comment}</p>}
-                {feedbackReady.strengths && feedbackReady.strengths.length > 0 && (
-                  <div>
-                    <p className="font-semibold">Strengths</p>
-                    <ul className="list-inside list-disc space-y-0.5">
-                      {feedbackReady.strengths.map((s, i) => (
-                        <li key={i}>{s}</li>
-                      ))}
-                    </ul>
+              ) : (
+                /* Roleplay feedback */
+                <div className="space-y-2 text-xs leading-relaxed text-[#1A1A18]">
+                  <div className="flex items-center justify-between border-b border-[#F0F0EA] pb-1">
+                    <p className="font-semibold">Overall score</p>
+                    <span className="font-semibold">
+                      {feedbackReady.overall_score ?? "-"}
+                      {typeof feedbackReady.overall_score === "number" ? "/10" : ""}
+                    </span>
                   </div>
-                )}
-                {feedbackReady.grammar_issues && feedbackReady.grammar_issues.length > 0 && (
-                  <div>
-                    <p className="font-semibold">Things to improve</p>
-                    <ul className="list-inside list-disc space-y-0.5">
-                      {feedbackReady.grammar_issues.map((g, i) => (
-                        <li key={i}>
-                          {g.quote} → {g.correction}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-                {feedbackReady.vocabulary && <p>{feedbackReady.vocabulary}</p>}
-                {feedbackReady.fluency && <p>{feedbackReady.fluency}</p>}
-                {feedbackReady.encouragement && (
-                  <p className="font-medium text-[#1A7A5E]">
-                    {feedbackReady.encouragement}
-                  </p>
-                )}
-              </div>
+                  {feedbackReady.overall_comment && <p>{feedbackReady.overall_comment}</p>}
+                  {feedbackReady.strengths && feedbackReady.strengths.length > 0 && (
+                    <div>
+                      <p className="font-semibold">Strengths</p>
+                      <ul className="list-inside list-disc space-y-0.5">
+                        {feedbackReady.strengths.map((s, i) => (
+                          <li key={i}>{s}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {feedbackReady.grammar_issues && feedbackReady.grammar_issues.length > 0 && (
+                    <div>
+                      <p className="font-semibold">Things to improve</p>
+                      <ul className="list-inside list-disc space-y-0.5">
+                        {feedbackReady.grammar_issues.map((g, i) => (
+                          <li key={i}>
+                            {g.quote} → {g.correction}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {feedbackReady.vocabulary && <p>{feedbackReady.vocabulary}</p>}
+                  {feedbackReady.fluency && <p>{feedbackReady.fluency}</p>}
+                  {feedbackReady.encouragement && (
+                    <p className="font-medium text-[#1A7A5E]">
+                      {feedbackReady.encouragement}
+                    </p>
+                  )}
+                </div>
+              )
             ) : roleplayEnded && feedbackText ? (
               <p className="text-xs leading-relaxed text-[#1A1A18]">{feedbackText}</p>
             ) : adviceText ? (
@@ -159,7 +204,7 @@ function ConversationContent() {
               </p>
             )}
           </div>
-          {adviceText && !isRoleplay && (
+          {adviceText && !isRoleplay && !isIelts && (
             <button
               onClick={translateAndPlaySinhala}
               className="w-full cursor-pointer rounded-lg bg-[#1A1A18] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[#33332E]"
@@ -182,7 +227,7 @@ function ConversationContent() {
         <MicButton
           isRecording={isRecording}
           disabled={micDisabled}
-          label={roleplayEnded ? "Start roleplay again" : undefined}
+          label={roleplayEnded ? (isIelts ? "Start test again" : "Start roleplay again") : undefined}
           onPressStart={roleplayEnded ? restartRoleplay : startRecording}
           onPressEnd={roleplayEnded ? undefined : stopRecording}
         />
